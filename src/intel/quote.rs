@@ -64,19 +64,19 @@ struct QuoteHeader {
     /// 0x00000081: TDX
     tee_type: i32,
     /// reserved
-    reserved1: [u8; 2],
+    reserved1: [u8; HEADER_RESERVED1_SIZE],
     /// reserved
-    reserved2: [u8; 2],
+    reserved2: [u8; HEADER_RESERVED2_SIZE],
     /// Unique identifier of the QE Vendor.
     /// Value: 939A7233F79C4CA9940A0DB3957F0607 (Intel® SGX QE Vendor)
-    qe_vendor_id: [u8; 16],
+    qe_vendor_id: [u8; HEADER_QE_VENDOR_ID_SIZE],
     /// Custom user-defined data. For the Intel® SGX and
     /// TDX DCAP Quote Generation Libraries, the first 16
     /// bytes contain a Platform Identifier that is used to
     /// link a PCK Certificate to an Enc(PPID). This
     /// identifier is consistent for every quote generated
     /// with this QE on this platform.
-    user_data: [u8; 20],
+    user_data: [u8; HEADER_USER_DATA_SIZE],
 }
 
 impl QuoteHeader {
