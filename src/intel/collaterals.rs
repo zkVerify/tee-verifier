@@ -145,7 +145,7 @@ impl TcbResponse {
         let mut signature_bytes = [0u8; ECDSA_SIGNATURE_SIZE];
         hex::decode_to_slice(&self.signature, &mut signature_bytes)
             .map_err(|_| CollateralError::PKCChain)?;
-        let _ = crate::cert::verify_signature(&cert, data.as_slice(), &signature_bytes)
+        crate::cert::verify_signature(&cert, data.as_slice(), &signature_bytes)
             .map_err(|_| CollateralError::BadSignature)?;
         self.tcb_info.verify(now)
     }

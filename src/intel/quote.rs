@@ -191,8 +191,8 @@ impl QeReportCertificationData {
     ) -> Result<(), VerificationError> {
         let hash = {
             let mut hasher = Sha256::new();
-            hasher.update(&attestation_key);
-            hasher.update(&self.qe_authentication_data.data.as_slice());
+            hasher.update(attestation_key);
+            hasher.update(self.qe_authentication_data.data.as_slice());
             hasher.finalize()
         };
 
@@ -421,14 +421,14 @@ impl QeCertificationData {
                     }
                 }
 
-                let _ = crate::cert::verify_signature(&cert, data, signature)
+                crate::cert::verify_signature(&cert, data, signature)
                     .map_err(|_| VerificationError::BadSignature)?;
             }
 
             CERT_DATA_TYPE_QE_REPORT => {
                 let qe_report_certification_data =
                     QeReportCertificationData::from_bytes(&self.certification_data[..]).unwrap();
-                let _ = qe_report_certification_data.verify(attestation_key, tcb)?;
+                qe_report_certification_data.verify(attestation_key, tcb)?;
             }
             _ => {
                 return Err(VerificationError::UnsupportedVerificationType);
@@ -473,12 +473,12 @@ impl QuoteSignatureData {
             VerifyingKey::from_sec1_bytes(&[&[4], &self.ecdsa_attestation_key[..]].concat()[..])
                 .unwrap();
         key.verify(
-            &signed_data,
+            signed_data,
             &Signature::from_bytes(&self.quote_signature.into()).unwrap(),
         )
         .map_err(|_| VerificationError::P256Error)?;
         self.qe_certification_data.verify(
-            &signed_data,
+            signed_data,
             &self.quote_signature,
             &self.ecdsa_attestation_key,
             tcb,
@@ -489,7 +489,7 @@ impl QuoteSignatureData {
 impl QuoteV4 {
     pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         // HEADER
-        let header = QuoteHeader::from_bytes(&input)?;
+        let header = QuoteHeader::from_bytes(input)?;
         if header.attestation_key_type != ATTESTATION_KEY_TYPE_ECDSA_256_P256 {
             return Err(ParseError::UnsupportedAttestationKeyType);
         }
@@ -552,7 +552,7 @@ impl QuoteV4 {
         self.header.to_bytes(&mut signed_data);
         self.body.to_bytes(&mut signed_data[QUOTE_HEADER_SIZE..]);
 
-        let _ = self.quote_signature_data.verify(&signed_data[..], &tcb)?;
+        self.quote_signature_data.verify(&signed_data[..], &tcb)?;
 
         if let Some(t) = &tcb {
             let tcb_status = self.check_tcb_level(&t.tcb_levels);
@@ -561,7 +561,7 @@ impl QuoteV4 {
             }
         }
 
-        let _ = self.extended_checks()?;
+        self.extended_checks()?;
         Ok(())
     }
 }

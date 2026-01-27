@@ -47,7 +47,7 @@ pub fn verify_pem_cert_chain(
     let pems = pem::parse_many(pck_certificate_chain_pem).map_err(|_| CertificateError::Parse)?;
     let mut certs: Vec<Certificate> = pems
         .into_iter()
-        .map(|pem| Certificate::from_der(&pem.contents().to_vec()).unwrap())
+        .map(|pem| Certificate::from_der(pem.contents()).unwrap())
         .collect();
 
     if certs.is_empty() {
@@ -62,7 +62,7 @@ pub fn verify_pem_cert_chain(
             .clone()
             .try_into()
             .unwrap();
-        let _ = verify_certificate(&certs[c], key)?;
+        verify_certificate(&certs[c], key)?;
     }
 
     Ok(certs[0].clone())
@@ -76,9 +76,8 @@ fn verify_certificate(cert: &Certificate, key: VerifyingKey) -> Result<(), Certi
             cert.signature.as_bytes().unwrap(),
         ),
     );
-    Ok(key
-        .verify(&verify_info)
-        .map_err(|_| CertificateError::KeyVerification)?)
+    key.verify(&verify_info)
+        .map_err(|_| CertificateError::KeyVerification)
 }
 
 pub fn get_ext(cert: &Certificate, oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
@@ -125,9 +124,9 @@ pub fn extract_tcb_info(
     // Parse each sequence, advancing by the actual encoded length
 
     // TCB SVN values (first 16 sequences)
-    for i in 0..TCB_SVN_COUNT {
+    for t in tcb.iter_mut() {
         let (value, seq_len) = parse_oid_value_pair(&data[offset..], &oid)?;
-        tcb[i] = value[0];
+        *t = value[0];
         offset += seq_len;
     }
 
@@ -212,9 +211,9 @@ pub fn verify_signature(
     let pck_verifying_key = p256::ecdsa::VerifyingKey::from_encoded_point(&point)
         .map_err(|_| CertificateError::BadSignature)?;
 
-    let _ = pck_verifying_key
+    pck_verifying_key
         .verify(
-            data.into(),
+            data,
             &p256::ecdsa::Signature::from_bytes(signature.into()).unwrap(),
         )
         .map_err(|_| CertificateError::BadSignature)?;
