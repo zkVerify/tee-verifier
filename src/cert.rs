@@ -16,8 +16,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::intel::constants::{ASN1_OID_VALUE_PAIR_LEN, TCB_SVN_COUNT};
-use crate::intel::quote::{PceSvn, TcbSvn};
 use asn1_der::typed::{DerDecodable, Sequence};
 pub use p256::ecdsa::signature::Verifier;
 use spki::ObjectIdentifier;
@@ -99,7 +97,7 @@ pub fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], Certif
 
     for i in 0..seq.len() {
         if let Ok(item) = Sequence::load(seq.get(i).expect("This should not happen")) {
-            if item.len() >= ASN1_OID_VALUE_PAIR_LEN {
+            if item.len() >= 2 {
                 if let Ok(oid_obj) = item.get(0) {
                     if oid_obj.value() == oid.as_bytes() {
                         let val_obj = item.get(1).expect("This should not happen");
@@ -112,42 +110,9 @@ pub fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], Certif
     Err(CertificateError::ExtensionNotFound)
 }
 
-pub fn extract_tcb_info(
-    data: &[u8],
-    oid: ObjectIdentifier,
-) -> Result<(TcbSvn, PceSvn), CertificateError> {
-    let mut tcb = [0u8; TCB_SVN_COUNT];
-    let mut offset = 0;
-
-    // The data is 17 concatenated ASN.1 sequences (16 TCB SVN + 1 PCE SVN)
-    // Each sequence contains an OID and an integer value
-    // Parse each sequence, advancing by the actual encoded length
-
-    // TCB SVN values (first 16 sequences)
-    for t in tcb.iter_mut() {
-        let (value, seq_len) = parse_oid_value_pair(&data[offset..], &oid)?;
-        *t = value[0];
-        offset += seq_len;
-    }
-
-    // PCE SVN (17th sequence)
-    let (pce_buf, _) = parse_oid_value_pair(&data[offset..], &oid)?;
-
-    let pce: u16 = match pce_buf.len() {
-        1 => pce_buf[0].into(),
-        2 => u16::from_le_bytes(
-            pce_buf[0..2]
-                .try_into()
-                .map_err(|_| CertificateError::ExtensionNotFound)?,
-        ),
-        _ => return Err(CertificateError::ExtensionNotFound),
-    };
-    Ok((tcb, pce))
-}
-
 /// Parse an ASN.1 sequence containing an OID-value pair
 /// Returns (value bytes, total sequence length in bytes)
-fn parse_oid_value_pair<'a>(
+pub fn parse_oid_value_pair<'a>(
     data: &'a [u8],
     oid: &ObjectIdentifier,
 ) -> Result<(&'a [u8], usize), CertificateError> {
@@ -179,7 +144,7 @@ fn parse_oid_value_pair<'a>(
     let seq =
         Sequence::decode(&data[..seq_len]).map_err(|_| CertificateError::ExtensionNotFound)?;
 
-    if seq.len() != ASN1_OID_VALUE_PAIR_LEN {
+    if seq.len() != 2 {
         return Err(CertificateError::ExtensionNotFound);
     }
 

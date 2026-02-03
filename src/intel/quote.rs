@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 pub use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
+use spki::ObjectIdentifier;
 
 use crate::intel::collaterals::{TcbInfo, TcbLevel, TcbStatus};
 use crate::intel::constants::*;
@@ -370,6 +371,39 @@ impl QeCertificationData {
         })
     }
 
+    pub fn extract_tcb_info(
+        data: &[u8],
+        oid: ObjectIdentifier,
+    ) -> Result<(TcbSvn, PceSvn), crate::cert::CertificateError> {
+        let mut tcb = [0u8; TCB_SVN_COUNT];
+        let mut offset = 0;
+
+        // The data is 17 concatenated ASN.1 sequences (16 TCB SVN + 1 PCE SVN)
+        // Each sequence contains an OID and an integer value
+        // Parse each sequence, advancing by the actual encoded length
+
+        // TCB SVN values (first 16 sequences)
+        for t in tcb.iter_mut() {
+            let (value, seq_len) = crate::cert::parse_oid_value_pair(&data[offset..], &oid)?;
+            *t = value[0];
+            offset += seq_len;
+        }
+
+        // PCE SVN (17th sequence)
+        let (pce_buf, _) = crate::cert::parse_oid_value_pair(&data[offset..], &oid)?;
+
+        let pce: u16 = match pce_buf.len() {
+            1 => pce_buf[0].into(),
+            2 => u16::from_le_bytes(
+                pce_buf[0..2]
+                    .try_into()
+                    .map_err(|_| crate::cert::CertificateError::ExtensionNotFound)?,
+            ),
+            _ => return Err(crate::cert::CertificateError::ExtensionNotFound),
+        };
+        Ok((tcb, pce))
+    }
+
     pub fn verify(
         &self,
         data: &[u8],
@@ -409,7 +443,7 @@ impl QeCertificationData {
                         spki::ObjectIdentifier::new(INTEL_TCB_OID).expect("Cannot decode OID");
                     let cert_tcb = crate::cert::extract_field(sgx_ext, tcb_oid)
                         .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
-                    let (cert_tcb, cert_pce) = crate::cert::extract_tcb_info(cert_tcb, tcb_oid)
+                    let (cert_tcb, cert_pce) = Self::extract_tcb_info(cert_tcb, tcb_oid)
                         .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
                     let (tcb_status, pce_svn) =
                         crate::intel::collaterals::compare_tcb_levels(&cert_tcb, &t.tcb_levels);

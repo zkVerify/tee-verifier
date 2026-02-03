@@ -133,9 +133,6 @@ pub const TCB_SVN_COUNT: usize = 16;
 pub const TCB_CHUNK_SIZE: usize = 18;
 pub const FMSPC_SIZE: usize = 6;
 
-// ASN.1 sequence expected element count for OID-value pairs
-pub const ASN1_OID_VALUE_PAIR_LEN: usize = 2;
-
 // =============================================================================
 // Attestation key types
 // =============================================================================
