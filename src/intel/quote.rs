@@ -30,6 +30,8 @@ pub enum ParseError {
     InvalidQeReport,
     InvalidQeReportSignature,
     InvalidBody,
+    InvalidCertificationData,
+    InvalidSignatureData,
     UnsupportedAttestationKeyType,
     UnsupportedCertificationDataType,
     UnsupportedVendorId,
@@ -48,6 +50,7 @@ pub enum VerificationError {
     BadTcbStatus(TcbStatus),
     BadPceStatus,
     BadSignature,
+    InvalidQeReportData,
 }
 
 #[derive(Debug)]
@@ -210,7 +213,7 @@ impl QeReportCertificationData {
             &self.qe_report_signature,
             attestation_key,
             tcb,
-            &crl,
+            crl,
         )
     }
 }
@@ -351,13 +354,22 @@ struct QeCertificationData {
 
 impl QeCertificationData {
     pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
-        let certification_data_type =
-            u16::from_le_bytes(input[..CERT_DATA_TYPE_FIELD_SIZE].try_into().unwrap());
+        if input.len() < CERT_DATA_HEADER_SIZE {
+            return Err(ParseError::InvalidCertificationData);
+        }
+        let certification_data_type = u16::from_le_bytes(
+            input[..CERT_DATA_TYPE_FIELD_SIZE]
+                .try_into()
+                .expect("length checked above"),
+        );
         let size = u32::from_le_bytes(
             input[CERT_DATA_TYPE_FIELD_SIZE..CERT_DATA_HEADER_SIZE]
                 .try_into()
-                .unwrap(),
+                .expect("length checked above"),
         );
+        if input.len() < CERT_DATA_HEADER_SIZE + (size as usize) {
+            return Err(ParseError::InvalidCertificationData);
+        }
         let certification_data =
             input[CERT_DATA_HEADER_SIZE..CERT_DATA_HEADER_SIZE + (size as usize)].to_vec();
         if certification_data_type != CERT_DATA_TYPE_PCK_CHAIN
@@ -465,7 +477,8 @@ impl QeCertificationData {
 
             CERT_DATA_TYPE_QE_REPORT => {
                 let qe_report_certification_data =
-                    QeReportCertificationData::from_bytes(&self.certification_data[..]).unwrap();
+                    QeReportCertificationData::from_bytes(&self.certification_data[..])
+                        .map_err(|_| VerificationError::InvalidQeReportData)?;
                 qe_report_certification_data.verify(attestation_key, tcb, crl)?;
             }
             _ => {
@@ -486,15 +499,18 @@ struct QuoteSignatureData {
 
 impl QuoteSignatureData {
     pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
-        let quote_signature: [u8; ECDSA_SIGNATURE_SIZE] =
-            input[..ECDSA_SIGNATURE_SIZE].try_into().unwrap();
+        if input.len() < ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE {
+            return Err(ParseError::InvalidSignatureData);
+        }
+        let quote_signature: [u8; ECDSA_SIGNATURE_SIZE] = input[..ECDSA_SIGNATURE_SIZE]
+            .try_into()
+            .expect("length checked above");
         let ecdsa_attestation_key: [u8; ATTESTATION_KEY_SIZE] = input
             [ECDSA_SIGNATURE_SIZE..ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE]
             .try_into()
-            .unwrap();
+            .expect("length checked above");
         let qe_certification_data =
-            QeCertificationData::from_bytes(&input[ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE..])
-                .unwrap();
+            QeCertificationData::from_bytes(&input[ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE..])?;
         Ok(QuoteSignatureData {
             quote_signature,
             ecdsa_attestation_key,
@@ -510,10 +526,11 @@ impl QuoteSignatureData {
     ) -> Result<(), VerificationError> {
         let key =
             VerifyingKey::from_sec1_bytes(&[&[4], &self.ecdsa_attestation_key[..]].concat()[..])
-                .unwrap();
+                .map_err(|_| VerificationError::P256Error)?;
         key.verify(
             signed_data,
-            &Signature::from_bytes(&self.quote_signature.into()).unwrap(),
+            &Signature::from_bytes(&self.quote_signature.into())
+                .map_err(|_| VerificationError::BadSignature)?,
         )
         .map_err(|_| VerificationError::P256Error)?;
         self.qe_certification_data.verify(
@@ -540,17 +557,21 @@ impl QuoteV4 {
         // BODY
         let body = QuoteBodyV4::from_bytes(&input[QUOTE_HEADER_SIZE..])?;
         let signature_data_offset = QUOTE_HEADER_SIZE + QUOTE_BODY_SIZE;
+        if input.len() < signature_data_offset + SIGNATURE_DATA_LEN_SIZE {
+            return Err(ParseError::InvalidSignatureData);
+        }
         let quote_signature_data_len = u32::from_le_bytes(
             input[signature_data_offset..signature_data_offset + SIGNATURE_DATA_LEN_SIZE]
                 .try_into()
-                .unwrap(),
+                .expect("length checked above"),
         );
         let signature_data_start = signature_data_offset + SIGNATURE_DATA_LEN_SIZE;
-        let quote_signature_data: QuoteSignatureData = QuoteSignatureData::from_bytes(
-            input[signature_data_start..signature_data_start + (quote_signature_data_len as usize)]
-                .into(),
-        )
-        .unwrap();
+        let signature_data_end = signature_data_start + (quote_signature_data_len as usize);
+        if input.len() < signature_data_end {
+            return Err(ParseError::InvalidSignatureData);
+        }
+        let quote_signature_data: QuoteSignatureData =
+            QuoteSignatureData::from_bytes(&input[signature_data_start..signature_data_end])?;
 
         Ok(QuoteV4 {
             header,

@@ -53,10 +53,11 @@ pub fn parse_crl(
     root_cert: Option<&[u8]>,
 ) -> Result<(u64, Crl), CertificateError> {
     let pems = pem::parse_many(crl_pem).map_err(|_| CertificateError::Parse)?;
-    let crls: Vec<CertificateList> = pems
+    let crls: Result<Vec<CertificateList>, _> = pems
         .into_iter()
-        .map(|pem| CertificateList::from_der(pem.contents()).unwrap())
+        .map(|pem| CertificateList::from_der(pem.contents()))
         .collect();
+    let crls = crls.map_err(|_| CertificateError::Parse)?;
 
     let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None)?;
     let sign_key: VerifyingKey = sign_cert
@@ -64,7 +65,7 @@ pub fn parse_crl(
         .subject_public_key_info
         .clone()
         .try_into()
-        .unwrap();
+        .map_err(|_| CertificateError::KeyVerification)?;
 
     let mut revoked_certs: Crl = Vec::new();
     let mut latest_this_update: u64 = 0;
@@ -101,8 +102,16 @@ pub fn parse_crl(
 
 fn verify_crl(crl: &CertificateList, key: &VerifyingKey) -> Result<(), CertificateError> {
     let verify_info = VerifyInfo::new(
-        crl.tbs_cert_list.to_der().unwrap().into(),
-        Signature::new(&crl.signature_algorithm, crl.signature.as_bytes().unwrap()),
+        crl.tbs_cert_list
+            .to_der()
+            .map_err(|_| CertificateError::Parse)?
+            .into(),
+        Signature::new(
+            &crl.signature_algorithm,
+            crl.signature
+                .as_bytes()
+                .ok_or(CertificateError::BadSignature)?,
+        ),
     );
     key.verify(&verify_info)
         .map_err(|_| CertificateError::KeyVerification)
@@ -114,17 +123,18 @@ pub fn verify_pem_cert_chain(
     crl: Option<&Crl>,
 ) -> Result<Certificate, CertificateError> {
     let pems = pem::parse_many(pck_certificate_chain_pem).map_err(|_| CertificateError::Parse)?;
-    let mut certs: Vec<Certificate> = pems
+    let certs: Result<Vec<Certificate>, _> = pems
         .into_iter()
-        .map(|pem| Certificate::from_der(pem.contents()).unwrap())
+        .map(|pem| Certificate::from_der(pem.contents()))
         .collect();
+    let mut certs = certs.map_err(|_| CertificateError::Parse)?;
 
     if certs.is_empty() {
         return Err(CertificateError::EmptyChain);
     }
 
     if let Some(r) = root_cert {
-        let root = Certificate::from_der(r).unwrap();
+        let root = Certificate::from_der(r).map_err(|_| CertificateError::Parse)?;
         certs.push(root);
     }
     for c in 0..certs.len() - 1 {
@@ -133,7 +143,7 @@ pub fn verify_pem_cert_chain(
             .subject_public_key_info
             .clone()
             .try_into()
-            .unwrap();
+            .map_err(|_| CertificateError::KeyVerification)?;
         verify_certificate(&certs[c], &key, crl)?;
     }
 
@@ -162,10 +172,15 @@ fn verify_certificate(
     }
 
     let verify_info = VerifyInfo::new(
-        cert.tbs_certificate.to_der().unwrap().into(),
+        cert.tbs_certificate
+            .to_der()
+            .map_err(|_| CertificateError::Parse)?
+            .into(),
         Signature::new(
             &cert.signature_algorithm,
-            cert.signature.as_bytes().unwrap(),
+            cert.signature
+                .as_bytes()
+                .ok_or(CertificateError::BadSignature)?,
         ),
     );
     key.verify(&verify_info)
@@ -190,15 +205,15 @@ pub fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], Certif
     let seq = Sequence::decode(data).map_err(|_| CertificateError::ExtensionNotFound)?;
 
     for i in 0..seq.len() {
-        if let Ok(item) = Sequence::load(seq.get(i).expect("This should not happen")) {
-            if item.len() >= 2 {
-                if let Ok(oid_obj) = item.get(0) {
-                    if oid_obj.value() == oid.as_bytes() {
-                        let val_obj = item.get(1).expect("This should not happen");
-                        return Ok(val_obj.value());
-                    }
-                }
-            }
+        let Ok(elem) = seq.get(i) else { continue };
+        let Ok(item) = Sequence::load(elem) else { continue };
+        if item.len() < 2 {
+            continue;
+        }
+        let Ok(oid_obj) = item.get(0) else { continue };
+        if oid_obj.value() == oid.as_bytes() {
+            let Ok(val_obj) = item.get(1) else { continue };
+            return Ok(val_obj.value());
         }
     }
     Err(CertificateError::ExtensionNotFound)
@@ -242,7 +257,10 @@ pub fn parse_oid_value_pair<'a>(
         return Err(CertificateError::ExtensionNotFound);
     }
 
-    let name = seq.get(0).expect("Failed to get OID").value();
+    let name = seq
+        .get(0)
+        .map_err(|_| CertificateError::ExtensionNotFound)?
+        .value();
     if name[..name.len() - 1] != *oid.as_bytes() {
         return Err(CertificateError::ExtensionNotFound);
     }
@@ -264,7 +282,7 @@ pub fn verify_signature(
             .subject_public_key_info
             .subject_public_key
             .as_bytes()
-            .unwrap(),
+            .ok_or(CertificateError::BadSignature)?,
     )
     .map_err(|_| CertificateError::BadSignature)?;
     let pck_verifying_key = p256::ecdsa::VerifyingKey::from_encoded_point(&point)
@@ -273,7 +291,8 @@ pub fn verify_signature(
     pck_verifying_key
         .verify(
             data,
-            &p256::ecdsa::Signature::from_bytes(signature.into()).unwrap(),
+            &p256::ecdsa::Signature::from_bytes(signature.into())
+                .map_err(|_| CertificateError::BadSignature)?,
         )
         .map_err(|_| CertificateError::BadSignature)?;
     Ok(())

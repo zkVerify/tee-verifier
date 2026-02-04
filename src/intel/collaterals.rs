@@ -180,7 +180,11 @@ pub fn compare_tcb_levels(quote_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbSta
         if tcb_level.tcb.tdx_components.is_none() {
             continue;
         }
-        let coll_tcb = &tcb_level.tcb.tdx_components.as_ref().unwrap();
+        let coll_tcb = &tcb_level
+            .tcb
+            .tdx_components
+            .as_ref()
+            .expect("tdx_components checked for Some above");
         if quote_tcb.len() != coll_tcb.len() {
             continue;
         }

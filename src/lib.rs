@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 pub mod cert;
 pub mod intel;
