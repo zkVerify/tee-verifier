@@ -21,6 +21,7 @@ pub use p256::ecdsa::signature::Verifier;
 use spki::ObjectIdentifier;
 use x509_verify::{
     x509_cert::{
+        crl::CertificateList,
         der::{Decode, Encode},
         Certificate,
     },
@@ -35,13 +36,83 @@ pub enum CertificateError {
     NoExtensions,
     ExtensionNotFound,
     BadSignature,
+    RevokedCertificate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedCertId {
+    pub issuer: Vec<u8>,
+    pub serial_number: Vec<u8>,
+}
+
+pub type Crl = Vec<RevokedCertId>;
+
+pub fn parse_crl(
+    crl_pem: &Vec<u8>,
+    pck_certificate_chain_pem: &Vec<u8>,
+    root_cert: Option<&[u8]>,
+) -> Result<(u64, Crl), CertificateError> {
+    let pems = pem::parse_many(crl_pem).map_err(|_| CertificateError::Parse)?;
+    let crls: Vec<CertificateList> = pems
+        .into_iter()
+        .map(|pem| CertificateList::from_der(pem.contents()).unwrap())
+        .collect();
+
+    let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None)?;
+    let sign_key: VerifyingKey = sign_cert
+        .tbs_certificate
+        .subject_public_key_info
+        .clone()
+        .try_into()
+        .unwrap();
+
+    let mut revoked_certs: Crl = Vec::new();
+    let mut latest_this_update: u64 = 0;
+
+    for crl in &crls {
+        verify_crl(crl, &sign_key)?;
+
+        // Extract this_update and track the latest one
+        let this_update_duration = crl.tbs_cert_list.this_update.to_unix_duration().as_secs();
+
+        latest_this_update = match this_update_duration {
+            current if current > this_update_duration => current,
+            _ => this_update_duration,
+        };
+
+        let issuer = crl
+            .tbs_cert_list
+            .issuer
+            .to_der()
+            .map_err(|_| CertificateError::Parse)?;
+
+        if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
+            for entry in revoked {
+                revoked_certs.push(RevokedCertId {
+                    issuer: issuer.clone(),
+                    serial_number: entry.serial_number.as_bytes().to_vec(),
+                });
+            }
+        }
+    }
+
+    Ok((latest_this_update, revoked_certs))
+}
+
+fn verify_crl(crl: &CertificateList, key: &VerifyingKey) -> Result<(), CertificateError> {
+    let verify_info = VerifyInfo::new(
+        crl.tbs_cert_list.to_der().unwrap().into(),
+        Signature::new(&crl.signature_algorithm, crl.signature.as_bytes().unwrap()),
+    );
+    key.verify(&verify_info)
+        .map_err(|_| CertificateError::KeyVerification)
 }
 
 pub fn verify_pem_cert_chain(
     pck_certificate_chain_pem: &Vec<u8>,
-    root_cert: &[u8],
+    root_cert: Option<&[u8]>,
+    crl: Option<&Crl>,
 ) -> Result<Certificate, CertificateError> {
-    let root = Certificate::from_der(root_cert).unwrap();
     let pems = pem::parse_many(pck_certificate_chain_pem).map_err(|_| CertificateError::Parse)?;
     let mut certs: Vec<Certificate> = pems
         .into_iter()
@@ -52,7 +123,10 @@ pub fn verify_pem_cert_chain(
         return Err(CertificateError::EmptyChain);
     }
 
-    certs.push(root);
+    if let Some(r) = root_cert {
+        let root = Certificate::from_der(r).unwrap();
+        certs.push(root);
+    }
     for c in 0..certs.len() - 1 {
         let key: VerifyingKey = certs[c + 1]
             .tbs_certificate
@@ -60,13 +134,33 @@ pub fn verify_pem_cert_chain(
             .clone()
             .try_into()
             .unwrap();
-        verify_certificate(&certs[c], key)?;
+        verify_certificate(&certs[c], &key, crl)?;
     }
 
     Ok(certs[0].clone())
 }
 
-fn verify_certificate(cert: &Certificate, key: VerifyingKey) -> Result<(), CertificateError> {
+fn verify_certificate(
+    cert: &Certificate,
+    key: &VerifyingKey,
+    crl: Option<&Crl>,
+) -> Result<(), CertificateError> {
+    if let Some(c) = crl {
+        let issuer = cert
+            .tbs_certificate
+            .issuer
+            .to_der()
+            .map_err(|_| CertificateError::Parse)?;
+        let serial = cert.tbs_certificate.serial_number.as_bytes().to_vec();
+        let cert_id = RevokedCertId {
+            issuer,
+            serial_number: serial,
+        };
+        if c.contains(&cert_id) {
+            return Err(CertificateError::RevokedCertificate);
+        }
+    }
+
     let verify_info = VerifyInfo::new(
         cert.tbs_certificate.to_der().unwrap().into(),
         Signature::new(
@@ -183,4 +277,53 @@ pub fn verify_signature(
         )
         .map_err(|_| CertificateError::BadSignature)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod should {
+    use crate::cert::parse_crl;
+    use chrono::DateTime;
+    use rstest::rstest;
+    use std::{fs::File, io::Read};
+
+    #[rstest]
+    #[case(
+        "assets/tests/intel/crl.pem",
+        "assets/tests/intel/crl_chain.pem",
+        "2026-02-03T09:32:53Z"
+    )]
+    #[case(
+        "assets/tests/intel/crl_platform.pem",
+        "assets/tests/intel/crl_chain_platform.pem",
+        "2026-02-03T10:55:02Z"
+    )]
+    #[should_panic(expected = "KeyVerification")]
+    #[case(
+        "assets/tests/intel/crl_platform.pem",
+        "assets/tests/intel/crl_chain_platform_ko.pem",
+        "2026-02-03T10:55:02Z"
+    )]
+    fn parse_quote(#[case] crl_path: &str, #[case] crl_chain_path: &str, #[case] exp_date: &str) {
+        let mut f = File::open(crl_path).unwrap();
+        let mut crl_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut crl_buf);
+
+        let mut f = File::open(crl_chain_path).unwrap();
+        let mut crl_chain_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut crl_chain_buf);
+
+        let mut f = File::open("assets/Intel_SGX_Provisioning_Certification_RootCA.cer").unwrap();
+        let mut root_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut root_buf);
+
+        let (date, _crl) = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf)).unwrap();
+        assert_eq!(
+            date,
+            DateTime::parse_from_rfc3339(exp_date)
+                .unwrap()
+                .timestamp()
+                .try_into()
+                .unwrap()
+        );
+    }
 }

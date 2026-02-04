@@ -137,9 +137,15 @@ pub enum TcbStatus {
 }
 
 impl TcbResponse {
-    pub fn verify(&self, certs: Vec<u8>, now: DateTime<Utc>) -> Result<(), CollateralError> {
-        let cert = crate::cert::verify_pem_cert_chain(&certs, crate::intel::ROOT_CERT)
-            .map_err(|_| CollateralError::PKCChain)?;
+    pub fn verify(
+        &self,
+        certs: Vec<u8>,
+        now: DateTime<Utc>,
+        crl: &crate::cert::Crl,
+    ) -> Result<(), CollateralError> {
+        let cert =
+            crate::cert::verify_pem_cert_chain(&certs, Some(crate::intel::ROOT_CERT), Some(crl))
+                .map_err(|_| CollateralError::PKCChain)?;
         let data: serde_json_core::heapless::Vec<u8, MAX_COLLATERAL_SIZE> =
             serde_json_core::to_vec(&self.tcb_info).map_err(|_| CollateralError::PKCChain)?;
         let mut signature_bytes = [0u8; ECDSA_SIGNATURE_SIZE];
@@ -234,6 +240,7 @@ mod should {
         let _ = f.read_to_end(&mut buf);
 
         let time = DateTime::parse_from_rfc3339(ts).unwrap().to_utc();
-        assert_ok!(tcb.verify(buf, time));
+        let crl: crate::cert::Crl = vec![];
+        assert_ok!(tcb.verify(buf, time, &crl));
     }
 }

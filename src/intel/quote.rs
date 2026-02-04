@@ -189,6 +189,7 @@ impl QeReportCertificationData {
         &self,
         attestation_key: &[u8],
         tcb: &Option<TcbInfo>,
+        crl: &crate::cert::Crl,
     ) -> Result<(), VerificationError> {
         let hash = {
             let mut hasher = Sha256::new();
@@ -209,6 +210,7 @@ impl QeReportCertificationData {
             &self.qe_report_signature,
             attestation_key,
             tcb,
+            &crl,
         )
     }
 }
@@ -410,12 +412,14 @@ impl QeCertificationData {
         signature: &[u8],
         attestation_key: &[u8],
         tcb: &Option<TcbInfo>,
+        crl: &crate::cert::Crl,
     ) -> Result<(), VerificationError> {
         match self.certification_data_type {
             CERT_DATA_TYPE_PCK_CHAIN => {
                 let cert = crate::cert::verify_pem_cert_chain(
                     &self.certification_data,
-                    crate::intel::ROOT_CERT,
+                    Some(crate::intel::ROOT_CERT),
+                    Some(crl),
                 )
                 .map_err(|_| VerificationError::PKCChain)?;
 
@@ -462,7 +466,7 @@ impl QeCertificationData {
             CERT_DATA_TYPE_QE_REPORT => {
                 let qe_report_certification_data =
                     QeReportCertificationData::from_bytes(&self.certification_data[..]).unwrap();
-                qe_report_certification_data.verify(attestation_key, tcb)?;
+                qe_report_certification_data.verify(attestation_key, tcb, crl)?;
             }
             _ => {
                 return Err(VerificationError::UnsupportedVerificationType);
@@ -502,6 +506,7 @@ impl QuoteSignatureData {
         &self,
         signed_data: &[u8],
         tcb: &Option<TcbInfo>,
+        crl: &crate::cert::Crl,
     ) -> Result<(), VerificationError> {
         let key =
             VerifyingKey::from_sec1_bytes(&[&[4], &self.ecdsa_attestation_key[..]].concat()[..])
@@ -516,6 +521,7 @@ impl QuoteSignatureData {
             &self.quote_signature,
             &self.ecdsa_attestation_key,
             tcb,
+            crl,
         )
     }
 }
@@ -570,7 +576,11 @@ impl QuoteV4 {
         status
     }
 
-    pub fn verify(&self, tcb: Option<TcbInfo>) -> Result<(), VerificationError> {
+    pub fn verify(
+        &self,
+        tcb: Option<TcbInfo>,
+        crl: &crate::cert::Crl,
+    ) -> Result<(), VerificationError> {
         // As per Intel documentation this needs to:
         // - Check the PCK Cert (signature chain).
         // - Check if the PCK Cert is on the CRL.
@@ -586,7 +596,8 @@ impl QuoteV4 {
         self.header.to_bytes(&mut signed_data);
         self.body.to_bytes(&mut signed_data[QUOTE_HEADER_SIZE..]);
 
-        self.quote_signature_data.verify(&signed_data[..], &tcb)?;
+        self.quote_signature_data
+            .verify(&signed_data[..], &tcb, crl)?;
 
         if let Some(t) = &tcb {
             let tcb_status = self.check_tcb_level(&t.tcb_levels);
@@ -629,7 +640,8 @@ mod should {
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
         let q = QuoteV4::from_bytes(&buf[..]).unwrap();
-        assert_ok!(q.verify(None));
+        let crl: crate::cert::Crl = vec![];
+        assert_ok!(q.verify(None, &crl));
     }
 
     #[rstest]
@@ -652,7 +664,8 @@ mod should {
         let _ = f.read_to_end(&mut buf);
 
         let (tcb, _used): (TcbResponse, usize) = serde_json_core::from_slice(&buf[..]).unwrap();
-        assert_ok!(q.verify(Some(tcb.tcb_info)));
+        let crl: crate::cert::Crl = vec![];
+        assert_ok!(q.verify(Some(tcb.tcb_info), &crl));
     }
 
     #[rstest]
@@ -662,6 +675,7 @@ mod should {
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
         let q = QuoteV4::from_bytes(&buf[..]).unwrap();
-        assert_eq!(q.verify(None), Err(VerificationError::PKCChain));
+        let crl: crate::cert::Crl = vec![];
+        assert_eq!(q.verify(None, &crl), Err(VerificationError::PKCChain));
     }
 }
