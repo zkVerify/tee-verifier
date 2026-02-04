@@ -47,59 +47,6 @@ pub struct RevokedCertId {
 
 pub type Crl = Vec<RevokedCertId>;
 
-pub fn parse_crl(
-    crl_pem: &Vec<u8>,
-    pck_certificate_chain_pem: &Vec<u8>,
-    root_cert: Option<&[u8]>,
-) -> Result<(u64, Crl), CertificateError> {
-    let pems = pem::parse_many(crl_pem).map_err(|_| CertificateError::Parse)?;
-    let crls: Result<Vec<CertificateList>, _> = pems
-        .into_iter()
-        .map(|pem| CertificateList::from_der(pem.contents()))
-        .collect();
-    let crls = crls.map_err(|_| CertificateError::Parse)?;
-
-    let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None)?;
-    let sign_key: VerifyingKey = sign_cert
-        .tbs_certificate
-        .subject_public_key_info
-        .clone()
-        .try_into()
-        .map_err(|_| CertificateError::KeyVerification)?;
-
-    let mut revoked_certs: Crl = Vec::new();
-    let mut latest_this_update: u64 = 0;
-
-    for crl in &crls {
-        verify_crl(crl, &sign_key)?;
-
-        // Extract this_update and track the latest one
-        let this_update_duration = crl.tbs_cert_list.this_update.to_unix_duration().as_secs();
-
-        latest_this_update = match this_update_duration {
-            current if current > this_update_duration => current,
-            _ => this_update_duration,
-        };
-
-        let issuer = crl
-            .tbs_cert_list
-            .issuer
-            .to_der()
-            .map_err(|_| CertificateError::Parse)?;
-
-        if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
-            for entry in revoked {
-                revoked_certs.push(RevokedCertId {
-                    issuer: issuer.clone(),
-                    serial_number: entry.serial_number.as_bytes().to_vec(),
-                });
-            }
-        }
-    }
-
-    Ok((latest_this_update, revoked_certs))
-}
-
 fn verify_crl(crl: &CertificateList, key: &VerifyingKey) -> Result<(), CertificateError> {
     let verify_info = VerifyInfo::new(
         crl.tbs_cert_list
@@ -117,7 +64,7 @@ fn verify_crl(crl: &CertificateList, key: &VerifyingKey) -> Result<(), Certifica
         .map_err(|_| CertificateError::KeyVerification)
 }
 
-pub fn verify_pem_cert_chain(
+pub(crate) fn verify_pem_cert_chain(
     pck_certificate_chain_pem: &Vec<u8>,
     root_cert: Option<&[u8]>,
     crl: Option<&Crl>,
@@ -187,7 +134,7 @@ fn verify_certificate(
         .map_err(|_| CertificateError::KeyVerification)
 }
 
-pub fn get_ext(cert: &Certificate, oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
+pub(crate) fn get_ext(cert: &Certificate, oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
     if cert.tbs_certificate.extensions.is_none() {
         return Err(CertificateError::NoExtensions);
     }
@@ -201,7 +148,7 @@ pub fn get_ext(cert: &Certificate, oid: ObjectIdentifier) -> Result<&[u8], Certi
     Err(CertificateError::ExtensionNotFound)
 }
 
-pub fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
+pub(crate) fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
     let seq = Sequence::decode(data).map_err(|_| CertificateError::ExtensionNotFound)?;
 
     for i in 0..seq.len() {
@@ -221,7 +168,7 @@ pub fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], Certif
 
 /// Parse an ASN.1 sequence containing an OID-value pair
 /// Returns (value bytes, total sequence length in bytes)
-pub fn parse_oid_value_pair<'a>(
+pub(crate) fn parse_oid_value_pair<'a>(
     data: &'a [u8],
     oid: &ObjectIdentifier,
 ) -> Result<(&'a [u8], usize), CertificateError> {
@@ -272,7 +219,7 @@ pub fn parse_oid_value_pair<'a>(
     Ok((val_obj.value(), seq_len))
 }
 
-pub fn verify_signature(
+pub(crate) fn verify_signature(
     cert: &Certificate,
     data: &[u8],
     signature: &[u8],
@@ -296,6 +243,60 @@ pub fn verify_signature(
         )
         .map_err(|_| CertificateError::BadSignature)?;
     Ok(())
+}
+
+// PUBLIC INTERFACE
+pub fn parse_crl(
+    crl_pem: &Vec<u8>,
+    pck_certificate_chain_pem: &Vec<u8>,
+    root_cert: Option<&[u8]>,
+) -> Result<(u64, Crl), CertificateError> {
+    let pems = pem::parse_many(crl_pem).map_err(|_| CertificateError::Parse)?;
+    let crls: Result<Vec<CertificateList>, _> = pems
+        .into_iter()
+        .map(|pem| CertificateList::from_der(pem.contents()))
+        .collect();
+    let crls = crls.map_err(|_| CertificateError::Parse)?;
+
+    let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None)?;
+    let sign_key: VerifyingKey = sign_cert
+        .tbs_certificate
+        .subject_public_key_info
+        .clone()
+        .try_into()
+        .map_err(|_| CertificateError::KeyVerification)?;
+
+    let mut revoked_certs: Crl = Vec::new();
+    let mut latest_this_update: u64 = 0;
+
+    for crl in &crls {
+        verify_crl(crl, &sign_key)?;
+
+        // Extract this_update and track the latest one
+        let this_update_duration = crl.tbs_cert_list.this_update.to_unix_duration().as_secs();
+
+        latest_this_update = match this_update_duration {
+            current if current > this_update_duration => current,
+            _ => this_update_duration,
+        };
+
+        let issuer = crl
+            .tbs_cert_list
+            .issuer
+            .to_der()
+            .map_err(|_| CertificateError::Parse)?;
+
+        if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
+            for entry in revoked {
+                revoked_certs.push(RevokedCertId {
+                    issuer: issuer.clone(),
+                    serial_number: entry.serial_number.as_bytes().to_vec(),
+                });
+            }
+        }
+    }
+
+    Ok((latest_this_update, revoked_certs))
 }
 
 #[cfg(test)]

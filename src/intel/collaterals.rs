@@ -158,7 +158,7 @@ impl TcbResponse {
 }
 
 impl TcbInfo {
-    pub fn verify(&self, now: DateTime<Utc>) -> Result<(), CollateralError> {
+    fn verify(&self, now: DateTime<Utc>) -> Result<(), CollateralError> {
         let issue = DateTime::parse_from_rfc3339(&self.issue_date)
             .map_err(|_| CollateralError::InvalidTcb)?;
         if now < issue {
@@ -174,7 +174,7 @@ impl TcbInfo {
     }
 }
 
-pub fn compare_tcb_levels(quote_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbStatus, PceSvn) {
+pub(crate) fn compare_tcb_levels(quote_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbStatus, PceSvn) {
     // Compare SVNs in TEE TCB SVN array retrieved from TD Report in Quote (from index 0 to 15 if TEE TCB SVN at index 1 is set to 0, or from index 2 to 15 otherwise) with the corresponding values of SVNs in tdxtcbcomponents array of TCB Level. If all TEE TCB SVNs in the TD Report are greater or equal to the corresponding values in TCB Level, read tcbStatus assigned to this TCB level. Otherwise, move to the next item on TCB Levels list.
     for tcb_level in levels {
         if tcb_level.tcb.tdx_components.is_none() {

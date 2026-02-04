@@ -84,7 +84,7 @@ struct QuoteHeader {
 }
 
 impl QuoteHeader {
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         Ok(QuoteHeader {
             version: i16::from_le_bytes(
                 input[HEADER_VERSION_OFFSET..HEADER_ATTESTATION_KEY_TYPE_OFFSET]
@@ -116,7 +116,7 @@ impl QuoteHeader {
         })
     }
 
-    pub fn to_bytes(&self, output: &mut [u8]) {
+    fn to_bytes(&self, output: &mut [u8]) {
         output[HEADER_VERSION_OFFSET..HEADER_ATTESTATION_KEY_TYPE_OFFSET]
             .copy_from_slice(&self.version.to_le_bytes());
         output[HEADER_ATTESTATION_KEY_TYPE_OFFSET..HEADER_TEE_TYPE_OFFSET]
@@ -139,7 +139,7 @@ struct QeAuthenticationData {
 }
 
 impl QeAuthenticationData {
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         let size = i16::from_le_bytes(
             input[..AUTH_DATA_SIZE_FIELD]
                 .try_into()
@@ -164,7 +164,7 @@ struct QeReportCertificationData {
 }
 
 impl QeReportCertificationData {
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         let qe_report = &input[..QE_REPORT_SIZE];
         let qe_report_signature = &input[QE_REPORT_SIZE..QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE];
         // TODO: check the signature!!!
@@ -188,7 +188,7 @@ impl QeReportCertificationData {
         })
     }
 
-    pub fn verify(
+    fn verify(
         &self,
         attestation_key: &[u8],
         tcb: &Option<TcbInfo>,
@@ -265,7 +265,7 @@ struct QuoteBodyV4 {
 }
 
 impl QuoteBodyV4 {
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         Ok(QuoteBodyV4 {
             tee_tcb_svn: input[BODY_TEE_TCB_SVN_OFFSET..BODY_MRSEAM_OFFSET]
                 .try_into()
@@ -315,7 +315,7 @@ impl QuoteBodyV4 {
         })
     }
 
-    pub fn to_bytes(&self, output: &mut [u8]) {
+    fn to_bytes(&self, output: &mut [u8]) {
         output[BODY_TEE_TCB_SVN_OFFSET..BODY_MRSEAM_OFFSET].copy_from_slice(&self.tee_tcb_svn);
         output[BODY_MRSEAM_OFFSET..BODY_MRSIGNERSEAM_OFFSET].copy_from_slice(&self._mrseam);
         output[BODY_MRSIGNERSEAM_OFFSET..BODY_SEAMATTRIBUTES_OFFSET]
@@ -353,7 +353,7 @@ struct QeCertificationData {
 }
 
 impl QeCertificationData {
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         if input.len() < CERT_DATA_HEADER_SIZE {
             return Err(ParseError::InvalidCertificationData);
         }
@@ -385,7 +385,7 @@ impl QeCertificationData {
         })
     }
 
-    pub fn extract_tcb_info(
+    fn extract_tcb_info(
         data: &[u8],
         oid: ObjectIdentifier,
     ) -> Result<(TcbSvn, PceSvn), crate::cert::CertificateError> {
@@ -418,7 +418,7 @@ impl QeCertificationData {
         Ok((tcb, pce))
     }
 
-    pub fn verify(
+    fn verify(
         &self,
         data: &[u8],
         signature: &[u8],
@@ -498,7 +498,7 @@ struct QuoteSignatureData {
 }
 
 impl QuoteSignatureData {
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         if input.len() < ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE {
             return Err(ParseError::InvalidSignatureData);
         }
@@ -518,7 +518,7 @@ impl QuoteSignatureData {
         })
     }
 
-    pub fn verify(
+    fn verify(
         &self,
         signed_data: &[u8],
         tcb: &Option<TcbInfo>,
