@@ -193,6 +193,7 @@ impl QeReportCertificationData {
         attestation_key: &[u8],
         tcb: &Option<TcbInfo>,
         crl: &crate::cert::Crl,
+        now: u64,
     ) -> Result<(), VerificationError> {
         let hash = {
             let mut hasher = Sha256::new();
@@ -214,6 +215,7 @@ impl QeReportCertificationData {
             attestation_key,
             tcb,
             crl,
+            now,
         )
     }
 }
@@ -425,6 +427,7 @@ impl QeCertificationData {
         attestation_key: &[u8],
         tcb: &Option<TcbInfo>,
         crl: &crate::cert::Crl,
+        now: u64,
     ) -> Result<(), VerificationError> {
         match self.certification_data_type {
             CERT_DATA_TYPE_PCK_CHAIN => {
@@ -432,6 +435,7 @@ impl QeCertificationData {
                     &self.certification_data,
                     Some(crate::intel::ROOT_CERT),
                     Some(crl),
+                    now,
                 )
                 .map_err(|_| VerificationError::PKCChain)?;
 
@@ -479,7 +483,7 @@ impl QeCertificationData {
                 let qe_report_certification_data =
                     QeReportCertificationData::from_bytes(&self.certification_data[..])
                         .map_err(|_| VerificationError::InvalidQeReportData)?;
-                qe_report_certification_data.verify(attestation_key, tcb, crl)?;
+                qe_report_certification_data.verify(attestation_key, tcb, crl, now)?;
             }
             _ => {
                 return Err(VerificationError::UnsupportedVerificationType);
@@ -523,6 +527,7 @@ impl QuoteSignatureData {
         signed_data: &[u8],
         tcb: &Option<TcbInfo>,
         crl: &crate::cert::Crl,
+        now: u64,
     ) -> Result<(), VerificationError> {
         let key =
             VerifyingKey::from_sec1_bytes(&[&[4], &self.ecdsa_attestation_key[..]].concat()[..])
@@ -539,6 +544,7 @@ impl QuoteSignatureData {
             &self.ecdsa_attestation_key,
             tcb,
             crl,
+            now,
         )
     }
 }
@@ -601,11 +607,12 @@ impl QuoteV4 {
         &self,
         tcb: Option<TcbInfo>,
         crl: &crate::cert::Crl,
+        now: u64,
     ) -> Result<(), VerificationError> {
         // As per Intel documentation this needs to:
         // - Check the PCK Cert (signature chain).
         // - Check if the PCK Cert is on the CRL.
-        // - Check the verification collaterals’ cert signature chain, including PCK Cert Chain, TCB info chain and QE identity chain
+        // - Check the verification collaterals' cert signature chain, including PCK Cert Chain, TCB info chain and QE identity chain
         // - Check if verification collaterals are on the CRL.
         // - Check the TDQE Report signature and the contained AK hash using the PCK Cert.
         // - Check the measurements of the TDQE contained in the TDQE Report.
@@ -618,7 +625,7 @@ impl QuoteV4 {
         self.body.to_bytes(&mut signed_data[QUOTE_HEADER_SIZE..]);
 
         self.quote_signature_data
-            .verify(&signed_data[..], &tcb, crl)?;
+            .verify(&signed_data[..], &tcb, crl, now)?;
 
         if let Some(t) = &tcb {
             let tcb_status = self.check_tcb_level(&t.tcb_levels);
@@ -662,7 +669,8 @@ mod should {
         let _ = f.read_to_end(&mut buf);
         let q = QuoteV4::from_bytes(&buf[..]).unwrap();
         let crl: crate::cert::Crl = vec![];
-        assert_ok!(q.verify(None, &crl));
+        let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
+        assert_ok!(q.verify(None, &crl, now));
     }
 
     #[rstest]
@@ -686,7 +694,8 @@ mod should {
 
         let (tcb, _used): (TcbResponse, usize) = serde_json_core::from_slice(&buf[..]).unwrap();
         let crl: crate::cert::Crl = vec![];
-        assert_ok!(q.verify(Some(tcb.tcb_info), &crl));
+        let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
+        assert_ok!(q.verify(Some(tcb.tcb_info), &crl, now));
     }
 
     #[rstest]
@@ -697,6 +706,7 @@ mod should {
         let _ = f.read_to_end(&mut buf);
         let q = QuoteV4::from_bytes(&buf[..]).unwrap();
         let crl: crate::cert::Crl = vec![];
-        assert_eq!(q.verify(None, &crl), Err(VerificationError::PKCChain));
+        let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
+        assert_eq!(q.verify(None, &crl, now), Err(VerificationError::PKCChain));
     }
 }

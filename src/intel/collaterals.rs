@@ -19,8 +19,6 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use chrono::{DateTime, Utc};
-
 use crate::intel::constants::{ECDSA_SIGNATURE_SIZE, MAX_COLLATERAL_SIZE};
 use crate::intel::quote::{PceSvn, TcbSvn};
 
@@ -140,12 +138,16 @@ impl TcbResponse {
     pub fn verify(
         &self,
         certs: Vec<u8>,
-        now: DateTime<Utc>,
+        now: u64,
         crl: &crate::cert::Crl,
     ) -> Result<(), CollateralError> {
-        let cert =
-            crate::cert::verify_pem_cert_chain(&certs, Some(crate::intel::ROOT_CERT), Some(crl))
-                .map_err(|_| CollateralError::PKCChain)?;
+        let cert = crate::cert::verify_pem_cert_chain(
+            &certs,
+            Some(crate::intel::ROOT_CERT),
+            Some(crl),
+            now,
+        )
+        .map_err(|_| CollateralError::PKCChain)?;
         let data: serde_json_core::heapless::Vec<u8, MAX_COLLATERAL_SIZE> =
             serde_json_core::to_vec(&self.tcb_info).map_err(|_| CollateralError::PKCChain)?;
         let mut signature_bytes = [0u8; ECDSA_SIGNATURE_SIZE];
@@ -158,14 +160,16 @@ impl TcbResponse {
 }
 
 impl TcbInfo {
-    fn verify(&self, now: DateTime<Utc>) -> Result<(), CollateralError> {
-        let issue = DateTime::parse_from_rfc3339(&self.issue_date)
-            .map_err(|_| CollateralError::InvalidTcb)?;
+    pub fn verify(&self, now: u64) -> Result<(), CollateralError> {
+        let issue = chrono::DateTime::parse_from_rfc3339(&self.issue_date)
+            .map_err(|_| CollateralError::InvalidTcb)?
+            .timestamp() as u64;
         if now < issue {
             return Err(CollateralError::TooEarly);
         }
-        let next = DateTime::parse_from_rfc3339(&self.next_update)
-            .map_err(|_| CollateralError::InvalidTcb)?;
+        let next = chrono::DateTime::parse_from_rfc3339(&self.next_update)
+            .map_err(|_| CollateralError::InvalidTcb)?
+            .timestamp() as u64;
         if now > next {
             return Err(CollateralError::Expired);
         }
@@ -174,7 +178,10 @@ impl TcbInfo {
     }
 }
 
-pub(crate) fn compare_tcb_levels(quote_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbStatus, PceSvn) {
+pub(crate) fn compare_tcb_levels(
+    quote_tcb: &TcbSvn,
+    levels: &Vec<TcbLevel>,
+) -> (TcbStatus, PceSvn) {
     // Compare SVNs in TEE TCB SVN array retrieved from TD Report in Quote (from index 0 to 15 if TEE TCB SVN at index 1 is set to 0, or from index 2 to 15 otherwise) with the corresponding values of SVNs in tdxtcbcomponents array of TCB Level. If all TEE TCB SVNs in the TD Report are greater or equal to the corresponding values in TCB Level, read tcbStatus assigned to this TCB level. Otherwise, move to the next item on TCB Levels list.
     for tcb_level in levels {
         if tcb_level.tcb.tdx_components.is_none() {
@@ -210,7 +217,6 @@ pub(crate) fn compare_tcb_levels(quote_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> 
 mod should {
     use crate::intel::collaterals::TcbResponse;
     use assert_ok::assert_ok;
-    use chrono::DateTime;
     use rstest::rstest;
     use std::{fs::File, io::Read};
 
@@ -243,7 +249,9 @@ mod should {
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
 
-        let time = DateTime::parse_from_rfc3339(ts).unwrap().to_utc();
+        let time = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .timestamp() as u64;
         let crl: crate::cert::Crl = vec![];
         assert_ok!(tcb.verify(buf, time, &crl));
     }

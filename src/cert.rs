@@ -37,6 +37,8 @@ pub enum CertificateError {
     ExtensionNotFound,
     BadSignature,
     RevokedCertificate,
+    CertificateNotYetValid,
+    CertificateExpired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +70,7 @@ pub(crate) fn verify_pem_cert_chain(
     pck_certificate_chain_pem: &Vec<u8>,
     root_cert: Option<&[u8]>,
     crl: Option<&Crl>,
+    now: u64,
 ) -> Result<Certificate, CertificateError> {
     let pems = pem::parse_many(pck_certificate_chain_pem).map_err(|_| CertificateError::Parse)?;
     let certs: Result<Vec<Certificate>, _> = pems
@@ -91,7 +94,7 @@ pub(crate) fn verify_pem_cert_chain(
             .clone()
             .try_into()
             .map_err(|_| CertificateError::KeyVerification)?;
-        verify_certificate(&certs[c], &key, crl)?;
+        verify_certificate(&certs[c], &key, crl, now)?;
     }
 
     Ok(certs[0].clone())
@@ -101,7 +104,29 @@ fn verify_certificate(
     cert: &Certificate,
     key: &VerifyingKey,
     crl: Option<&Crl>,
+    now: u64,
 ) -> Result<(), CertificateError> {
+    // Check certificate validity period
+    let not_before = cert
+        .tbs_certificate
+        .validity
+        .not_before
+        .to_unix_duration()
+        .as_secs();
+    let not_after = cert
+        .tbs_certificate
+        .validity
+        .not_after
+        .to_unix_duration()
+        .as_secs();
+
+    if now < not_before {
+        return Err(CertificateError::CertificateNotYetValid);
+    }
+    if now > not_after {
+        return Err(CertificateError::CertificateExpired);
+    }
+
     if let Some(c) = crl {
         let issuer = cert
             .tbs_certificate
@@ -134,7 +159,10 @@ fn verify_certificate(
         .map_err(|_| CertificateError::KeyVerification)
 }
 
-pub(crate) fn get_ext(cert: &Certificate, oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
+pub(crate) fn get_ext(
+    cert: &Certificate,
+    oid: ObjectIdentifier,
+) -> Result<&[u8], CertificateError> {
     if cert.tbs_certificate.extensions.is_none() {
         return Err(CertificateError::NoExtensions);
     }
@@ -153,7 +181,9 @@ pub(crate) fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8],
 
     for i in 0..seq.len() {
         let Ok(elem) = seq.get(i) else { continue };
-        let Ok(item) = Sequence::load(elem) else { continue };
+        let Ok(item) = Sequence::load(elem) else {
+            continue;
+        };
         if item.len() < 2 {
             continue;
         }
@@ -250,6 +280,7 @@ pub fn parse_crl(
     crl_pem: &Vec<u8>,
     pck_certificate_chain_pem: &Vec<u8>,
     root_cert: Option<&[u8]>,
+    now: u64,
 ) -> Result<(u64, Crl), CertificateError> {
     let pems = pem::parse_many(crl_pem).map_err(|_| CertificateError::Parse)?;
     let crls: Result<Vec<CertificateList>, _> = pems
@@ -258,7 +289,7 @@ pub fn parse_crl(
         .collect();
     let crls = crls.map_err(|_| CertificateError::Parse)?;
 
-    let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None)?;
+    let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None, now)?;
     let sign_key: VerifyingKey = sign_cert
         .tbs_certificate
         .subject_public_key_info
@@ -301,7 +332,7 @@ pub fn parse_crl(
 
 #[cfg(test)]
 mod should {
-    use crate::cert::parse_crl;
+    use crate::cert::{parse_crl, CertificateError};
     use chrono::DateTime;
     use rstest::rstest;
     use std::{fs::File, io::Read};
@@ -336,14 +367,75 @@ mod should {
         let mut root_buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut root_buf);
 
-        let (date, _crl) = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf)).unwrap();
-        assert_eq!(
-            date,
-            DateTime::parse_from_rfc3339(exp_date)
-                .unwrap()
-                .timestamp()
-                .try_into()
-                .unwrap()
-        );
+        let now = DateTime::parse_from_rfc3339(exp_date)
+            .unwrap()
+            .timestamp()
+            .try_into()
+            .unwrap();
+        let (date, _crl) = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf), now).unwrap();
+        assert_eq!(date, now);
+    }
+
+    #[rstest]
+    #[case(
+        "assets/tests/intel/crl.pem",
+        "assets/tests/intel/crl_chain.pem",
+        // Before certificate notBefore (May 21 2018)
+        "2018-01-01T00:00:00Z"
+    )]
+    fn reject_certificate_not_yet_valid(
+        #[case] crl_path: &str,
+        #[case] crl_chain_path: &str,
+        #[case] timestamp: &str,
+    ) {
+        let mut f = File::open(crl_path).unwrap();
+        let mut crl_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut crl_buf);
+
+        let mut f = File::open(crl_chain_path).unwrap();
+        let mut crl_chain_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut crl_chain_buf);
+
+        let mut f = File::open("assets/Intel_SGX_Provisioning_Certification_RootCA.cer").unwrap();
+        let mut root_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut root_buf);
+
+        let now = DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp() as u64;
+
+        let result = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf), now);
+        assert!(matches!(
+            result,
+            Err(CertificateError::CertificateNotYetValid)
+        ));
+    }
+
+    #[rstest]
+    #[case(
+        "assets/tests/intel/crl.pem",
+        "assets/tests/intel/crl_chain.pem",
+        // After certificate notAfter (May 21 2033)
+        "2034-01-01T00:00:00Z"
+    )]
+    fn reject_certificate_expired(
+        #[case] crl_path: &str,
+        #[case] crl_chain_path: &str,
+        #[case] timestamp: &str,
+    ) {
+        let mut f = File::open(crl_path).unwrap();
+        let mut crl_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut crl_buf);
+
+        let mut f = File::open(crl_chain_path).unwrap();
+        let mut crl_chain_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut crl_chain_buf);
+
+        let mut f = File::open("assets/Intel_SGX_Provisioning_Certification_RootCA.cer").unwrap();
+        let mut root_buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut root_buf);
+
+        let now = DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp() as u64;
+
+        let result = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf), now);
+        assert!(matches!(result, Err(CertificateError::CertificateExpired)));
     }
 }
