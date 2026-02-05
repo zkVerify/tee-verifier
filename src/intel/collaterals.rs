@@ -24,6 +24,7 @@ use crate::intel::quote::{PceSvn, TcbSvn};
 
 #[derive(Debug)]
 pub enum CollateralError {
+    Parse,
     InvalidTcb,
     TooEarly,
     Expired,
@@ -178,6 +179,13 @@ impl TcbInfo {
     }
 }
 
+/// Parse a TCB response from JSON bytes.
+pub fn parse_tcb_response(input: &[u8]) -> Result<TcbResponse, CollateralError> {
+    let (tcb_response, _): (TcbResponse, usize) =
+        serde_json_core::from_slice(input).map_err(|_| CollateralError::Parse)?;
+    Ok(tcb_response)
+}
+
 pub(crate) fn compare_tcb_levels(
     quote_tcb: &TcbSvn,
     levels: &Vec<TcbLevel>,
@@ -215,44 +223,101 @@ pub(crate) fn compare_tcb_levels(
 
 #[cfg(test)]
 mod should {
-    use crate::intel::collaterals::TcbResponse;
+    use super::parse_tcb_response;
     use assert_ok::assert_ok;
-    use rstest::rstest;
     use std::{fs::File, io::Read};
 
-    #[rstest]
-    #[case("assets/tests/intel/tcb_info_90.json")]
-    fn parse_tcb_info(#[case] path: &str) {
-        let mut f = File::open(path).unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
-        // serde-json-core deserializes from a byte slice
-        let (_tcb, _used): (TcbResponse, usize) = serde_json_core::from_slice(&buf[..]).unwrap();
-    }
-
-    #[rstest]
-    #[should_panic(expected = "TooEarly")]
-    #[case("2026-01-03T16:43:44Z")]
-    #[case("2026-01-23T16:43:44Z")]
-    #[should_panic(expected = "Expired")]
-    #[case("2026-03-03T16:43:44Z")]
-    fn verify_tcb_info(#[case] ts: &str) {
+    #[test]
+    fn parse_tcb_info() {
         let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
 
-        // serde-json-core deserializes from a byte slice
-        let (tcb, _used): (TcbResponse, usize) = serde_json_core::from_slice(&buf[..]).unwrap();
+        assert_ok!(parse_tcb_response(&buf));
+    }
+
+    #[test]
+    fn verify_tcb_response() {
+        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
+        let mut buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut buf);
+
+        let tcb = parse_tcb_response(&buf).unwrap();
 
         let mut f = File::open("assets/tests/intel/tcb_info_90.pem").unwrap();
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
 
-        let time = chrono::DateTime::parse_from_rfc3339(ts)
+        let time = chrono::DateTime::parse_from_rfc3339("2026-01-23T16:43:44Z")
             .unwrap()
             .timestamp() as u64;
         let crl: crate::cert::Crl = vec![];
         assert_ok!(tcb.verify(buf, time, &crl));
+    }
+
+    #[test]
+    fn verify_at_exact_issue_date() {
+        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
+        let mut buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut buf);
+
+        let tcb = parse_tcb_response(&buf).unwrap();
+
+        let issue_date = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.issue_date)
+            .unwrap()
+            .timestamp() as u64;
+
+        assert_ok!(tcb.tcb_info.verify(issue_date));
+    }
+
+    #[test]
+    fn verify_at_exact_next_update() {
+        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
+        let mut buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut buf);
+
+        let tcb = parse_tcb_response(&buf).unwrap();
+
+        let next_update = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.next_update)
+            .unwrap()
+            .timestamp() as u64;
+
+        assert_ok!(tcb.tcb_info.verify(next_update));
+    }
+
+    #[test]
+    fn reject_one_second_before_issue_date() {
+        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
+        let mut buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut buf);
+
+        let tcb = parse_tcb_response(&buf).unwrap();
+
+        let issue_date = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.issue_date)
+            .unwrap()
+            .timestamp() as u64;
+
+        assert!(matches!(
+            tcb.tcb_info.verify(issue_date - 1),
+            Err(super::CollateralError::TooEarly)
+        ));
+    }
+
+    #[test]
+    fn reject_one_second_after_next_update() {
+        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
+        let mut buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut buf);
+
+        let tcb = parse_tcb_response(&buf).unwrap();
+
+        let next_update = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.next_update)
+            .unwrap()
+            .timestamp() as u64;
+
+        assert!(matches!(
+            tcb.tcb_info.verify(next_update + 1),
+            Err(super::CollateralError::Expired)
+        ));
     }
 }

@@ -85,6 +85,9 @@ struct QuoteHeader {
 
 impl QuoteHeader {
     fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+        if input.len() < QUOTE_HEADER_SIZE {
+            return Err(ParseError::InvalidHeader);
+        }
         Ok(QuoteHeader {
             version: i16::from_le_bytes(
                 input[HEADER_VERSION_OFFSET..HEADER_ATTESTATION_KEY_TYPE_OFFSET]
@@ -167,7 +170,6 @@ impl QeReportCertificationData {
     fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         let qe_report = &input[..QE_REPORT_SIZE];
         let qe_report_signature = &input[QE_REPORT_SIZE..QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE];
-        // TODO: check the signature!!!
         let qe_authentication_data =
             QeAuthenticationData::from_bytes(&input[QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE..])?;
         let qe_certification_data = QeCertificationData::from_bytes(
@@ -191,7 +193,7 @@ impl QeReportCertificationData {
     fn verify(
         &self,
         attestation_key: &[u8],
-        tcb: &Option<TcbInfo>,
+        tcb: &TcbInfo,
         crl: &crate::cert::Crl,
         now: u64,
     ) -> Result<(), VerificationError> {
@@ -268,6 +270,9 @@ struct QuoteBodyV4 {
 
 impl QuoteBodyV4 {
     fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+        if input.len() < QUOTE_BODY_SIZE {
+            return Err(ParseError::InvalidBody);
+        }
         Ok(QuoteBodyV4 {
             tee_tcb_svn: input[BODY_TEE_TCB_SVN_OFFSET..BODY_MRSEAM_OFFSET]
                 .try_into()
@@ -425,7 +430,7 @@ impl QeCertificationData {
         data: &[u8],
         signature: &[u8],
         attestation_key: &[u8],
-        tcb: &Option<TcbInfo>,
+        tcb: &TcbInfo,
         crl: &crate::cert::Crl,
         now: u64,
     ) -> Result<(), VerificationError> {
@@ -451,28 +456,26 @@ impl QeCertificationData {
                 )
                 .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
 
-                if let Some(t) = tcb {
-                    let mut tcb_buf = [0u8; FMSPC_SIZE];
-                    hex::decode_to_slice(t.fmspc.clone(), &mut tcb_buf)
-                        .map_err(|_| VerificationError::FmspcMismatch)?;
-                    if tcb_buf != fmspc {
-                        return Err(VerificationError::FmspcMismatch);
-                    }
+                let mut tcb_buf = [0u8; FMSPC_SIZE];
+                hex::decode_to_slice(tcb.fmspc.clone(), &mut tcb_buf)
+                    .map_err(|_| VerificationError::FmspcMismatch)?;
+                if tcb_buf != fmspc {
+                    return Err(VerificationError::FmspcMismatch);
+                }
 
-                    let tcb_oid =
-                        spki::ObjectIdentifier::new(INTEL_TCB_OID).expect("Cannot decode OID");
-                    let cert_tcb = crate::cert::extract_field(sgx_ext, tcb_oid)
-                        .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
-                    let (cert_tcb, cert_pce) = Self::extract_tcb_info(cert_tcb, tcb_oid)
-                        .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
-                    let (tcb_status, pce_svn) =
-                        crate::intel::collaterals::compare_tcb_levels(&cert_tcb, &t.tcb_levels);
-                    if tcb_status >= TcbStatus::Revoked {
-                        return Err(VerificationError::BadTcbStatus(tcb_status));
-                    }
-                    if cert_pce < pce_svn {
-                        return Err(VerificationError::BadPceStatus);
-                    }
+                let tcb_oid =
+                    spki::ObjectIdentifier::new(INTEL_TCB_OID).expect("Cannot decode OID");
+                let cert_tcb = crate::cert::extract_field(sgx_ext, tcb_oid)
+                    .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
+                let (cert_tcb, cert_pce) = Self::extract_tcb_info(cert_tcb, tcb_oid)
+                    .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
+                let (tcb_status, pce_svn) =
+                    crate::intel::collaterals::compare_tcb_levels(&cert_tcb, &tcb.tcb_levels);
+                if tcb_status >= TcbStatus::Revoked {
+                    return Err(VerificationError::BadTcbStatus(tcb_status));
+                }
+                if cert_pce < pce_svn {
+                    return Err(VerificationError::BadPceStatus);
                 }
 
                 crate::cert::verify_signature(&cert, data, signature)
@@ -525,7 +528,7 @@ impl QuoteSignatureData {
     fn verify(
         &self,
         signed_data: &[u8],
-        tcb: &Option<TcbInfo>,
+        tcb: &TcbInfo,
         crl: &crate::cert::Crl,
         now: u64,
     ) -> Result<(), VerificationError> {
@@ -605,7 +608,7 @@ impl QuoteV4 {
 
     pub fn verify(
         &self,
-        tcb: Option<TcbInfo>,
+        tcb: &TcbInfo,
         crl: &crate::cert::Crl,
         now: u64,
     ) -> Result<(), VerificationError> {
@@ -625,13 +628,11 @@ impl QuoteV4 {
         self.body.to_bytes(&mut signed_data[QUOTE_HEADER_SIZE..]);
 
         self.quote_signature_data
-            .verify(&signed_data[..], &tcb, crl, now)?;
+            .verify(&signed_data[..], tcb, crl, now)?;
 
-        if let Some(t) = &tcb {
-            let tcb_status = self.check_tcb_level(&t.tcb_levels);
-            if tcb_status >= TcbStatus::Revoked {
-                return Err(VerificationError::BadTcbStatus(tcb_status));
-            }
+        let tcb_status = self.check_tcb_level(&tcb.tcb_levels);
+        if tcb_status >= TcbStatus::Revoked {
+            return Err(VerificationError::BadTcbStatus(tcb_status));
         }
 
         self.extended_checks()?;
@@ -639,12 +640,15 @@ impl QuoteV4 {
     }
 }
 
+/// Parse a quote from raw bytes.
+pub fn parse_quote(input: &[u8]) -> Result<QuoteV4, ParseError> {
+    QuoteV4::from_bytes(input)
+}
+
 #[cfg(test)]
 mod should {
-    use crate::intel::{
-        collaterals::TcbResponse,
-        quote::{QuoteV4, VerificationError},
-    };
+    use crate::intel::collaterals::parse_tcb_response;
+    use crate::intel::quote::{parse_quote, VerificationError};
     use assert_ok::assert_ok;
     use rstest::rstest;
     use std::{fs::File, io::Read};
@@ -652,25 +656,12 @@ mod should {
     #[rstest]
     #[case("assets/tests/intel/quote_b0.dat")]
     #[case("assets/tests/intel/quote_90.dat")]
-    #[case("assets/tests/intel/quote_no_cert.dat")] // no certificates
-    fn parse_quote(#[case] path: &str) {
+    #[case("assets/tests/intel/quote_no_cert.dat")]
+    fn parses_quote(#[case] path: &str) {
         let mut f = File::open(path).unwrap();
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
-        assert_ok!(QuoteV4::from_bytes(&buf[..]));
-    }
-
-    #[rstest]
-    #[case("assets/tests/intel/quote_b0.dat")]
-    #[case("assets/tests/intel/quote_90.dat")]
-    fn verify_quote(#[case] path: &str) {
-        let mut f = File::open(path).unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-        let q = QuoteV4::from_bytes(&buf[..]).unwrap();
-        let crl: crate::cert::Crl = vec![];
-        let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
-        assert_ok!(q.verify(None, &crl, now));
+        assert_ok!(parse_quote(&buf));
     }
 
     #[rstest]
@@ -682,31 +673,39 @@ mod should {
         "assets/tests/intel/quote_b0.dat",
         "assets/tests/intel/tcb_info_b0.json"
     )]
-    fn verify_quote_w_tcbinfo(#[case] quote_path: &str, #[case] coll_path: &str) {
+    fn verify_quote(#[case] quote_path: &str, #[case] coll_path: &str) {
         let mut f = File::open(quote_path).unwrap();
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
-        let q = QuoteV4::from_bytes(&buf[..]).unwrap();
+        let q = parse_quote(&buf).unwrap();
 
         let mut f = File::open(coll_path).unwrap();
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
 
-        let (tcb, _used): (TcbResponse, usize) = serde_json_core::from_slice(&buf[..]).unwrap();
+        let tcb = parse_tcb_response(&buf).unwrap();
         let crl: crate::cert::Crl = vec![];
         let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
-        assert_ok!(q.verify(Some(tcb.tcb_info), &crl, now));
+        assert_ok!(q.verify(&tcb.tcb_info, &crl, now));
     }
 
-    #[rstest]
-    #[case("assets/tests/intel/quote_no_cert.dat")] // no certificates
-    fn reject_quote_wo_certificates(#[case] path: &str) {
-        let mut f = File::open(path).unwrap();
+    #[test]
+    fn reject_quote_wo_certificates() {
+        let mut f = File::open("assets/tests/intel/quote_no_cert.dat").unwrap();
         let mut buf = Vec::<u8>::new();
         let _ = f.read_to_end(&mut buf);
-        let q = QuoteV4::from_bytes(&buf[..]).unwrap();
+        let q = parse_quote(&buf).unwrap();
+
+        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
+        let mut buf = Vec::<u8>::new();
+        let _ = f.read_to_end(&mut buf);
+
+        let tcb = parse_tcb_response(&buf).unwrap();
         let crl: crate::cert::Crl = vec![];
         let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
-        assert_eq!(q.verify(None, &crl, now), Err(VerificationError::PKCChain));
+        assert_eq!(
+            q.verify(&tcb.tcb_info, &crl, now),
+            Err(VerificationError::PKCChain)
+        );
     }
 }
