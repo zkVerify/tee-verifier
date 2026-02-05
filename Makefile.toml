@@ -15,7 +15,7 @@ args = ["target", "add", "thumbv7em-none-eabi"]
 [tasks.build-bare-metal]
 dependencies = ["install-bare-metal"]
 command = "cargo"
-args = ["build", "--no-default-features", "--package", "tee-zkv-verifier", "--target", "thumbv7em-none-eabi"]
+args = ["build", "--no-default-features", "--target", "thumbv7em-none-eabi"]
 
 [tasks.build]
 command = "cargo"
