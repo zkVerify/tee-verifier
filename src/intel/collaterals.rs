@@ -36,7 +36,7 @@ pub enum CollateralError {
 #[serde(rename_all = "camelCase")]
 pub struct TcbResponse {
     pub tcb_info: TcbInfo,
-    pub signature: String,
+    signature: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -50,14 +50,14 @@ pub struct TcbInfo {
     pub pce_id: String,
     pub tcb_type: u32,
     pub tcb_evaluation_data_number: u32,
-    pub tdx_module: TdxModule,
-    pub tdx_module_identities: Vec<TdxModuleIdentity>,
-    pub tcb_levels: Vec<TcbLevel>,
+    pub(crate) tdx_module: TdxModule,
+    pub(crate) tdx_module_identities: Vec<TdxModuleIdentity>,
+    pub(crate) tcb_levels: Vec<TcbLevel>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TdxModule {
+pub(crate) struct TdxModule {
     pub mrsigner: String,
     pub attributes: String,
     pub attributes_mask: String,
@@ -65,7 +65,7 @@ pub struct TdxModule {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TdxModuleIdentity {
+pub(crate) struct TdxModuleIdentity {
     pub id: String,
     pub mrsigner: String,
     pub attributes: String,
@@ -75,7 +75,7 @@ pub struct TdxModuleIdentity {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TcbLevel {
+pub(crate) struct TcbLevel {
     pub tcb: Tcb,
     pub tcb_date: String,
     pub tcb_status: TcbStatus,
@@ -86,7 +86,7 @@ pub struct TcbLevel {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Tcb {
+pub(crate) struct Tcb {
     #[serde(rename = "isvsvn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isv_svn: Option<u16>, // from the docs, "integer"
@@ -103,7 +103,7 @@ pub struct Tcb {
 
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
-pub struct TcbComponents {
+pub(crate) struct TcbComponents {
     pub svn: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -227,40 +227,36 @@ mod should {
     use assert_ok::assert_ok;
     use std::{fs::File, io::Read};
 
+    fn load_file(path: &str) -> Vec<u8> {
+        let mut f = File::open(path).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        buf
+    }
+
     #[test]
     fn parse_tcb_info() {
-        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
+        let buf = load_file("assets/tests/intel/tcb_info_90.json");
         assert_ok!(parse_tcb_response(&buf));
     }
 
     #[test]
     fn verify_tcb_response() {
-        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
+        let tcb_buf = load_file("assets/tests/intel/tcb_info_90.json");
+        let tcb = parse_tcb_response(&tcb_buf).unwrap();
 
-        let tcb = parse_tcb_response(&buf).unwrap();
-
-        let mut f = File::open("assets/tests/intel/tcb_info_90.pem").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
+        let chain_buf = load_file("assets/tests/intel/tcb_info_90.pem");
 
         let time = chrono::DateTime::parse_from_rfc3339("2026-01-23T16:43:44Z")
             .unwrap()
             .timestamp() as u64;
         let crl: crate::cert::Crl = vec![];
-        assert_ok!(tcb.verify(buf, time, &crl));
+        assert_ok!(tcb.verify(chain_buf, time, &crl));
     }
 
     #[test]
     fn verify_at_exact_issue_date() {
-        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
+        let buf = load_file("assets/tests/intel/tcb_info_90.json");
         let tcb = parse_tcb_response(&buf).unwrap();
 
         let issue_date = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.issue_date)
@@ -272,10 +268,7 @@ mod should {
 
     #[test]
     fn verify_at_exact_next_update() {
-        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
+        let buf = load_file("assets/tests/intel/tcb_info_90.json");
         let tcb = parse_tcb_response(&buf).unwrap();
 
         let next_update = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.next_update)
@@ -287,10 +280,7 @@ mod should {
 
     #[test]
     fn reject_one_second_before_issue_date() {
-        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
+        let buf = load_file("assets/tests/intel/tcb_info_90.json");
         let tcb = parse_tcb_response(&buf).unwrap();
 
         let issue_date = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.issue_date)
@@ -305,10 +295,7 @@ mod should {
 
     #[test]
     fn reject_one_second_after_next_update() {
-        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
+        let buf = load_file("assets/tests/intel/tcb_info_90.json");
         let tcb = parse_tcb_response(&buf).unwrap();
 
         let next_update = chrono::DateTime::parse_from_rfc3339(&tcb.tcb_info.next_update)

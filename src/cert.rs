@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use asn1_der::typed::{DerDecodable, Sequence};
-pub use p256::ecdsa::signature::Verifier;
+use p256::ecdsa::signature::Verifier;
 use spki::ObjectIdentifier;
 use x509_verify::{
     x509_cert::{
@@ -337,6 +337,17 @@ mod should {
     use rstest::rstest;
     use std::{fs::File, io::Read};
 
+    fn load_file(path: &str) -> Vec<u8> {
+        let mut f = File::open(path).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        buf
+    }
+
+    fn load_root_cert() -> Vec<u8> {
+        load_file("assets/Intel_SGX_Provisioning_Certification_RootCA.cer")
+    }
+
     #[rstest]
     #[case(
         "assets/tests/intel/crl.pem",
@@ -355,17 +366,9 @@ mod should {
         "2026-02-03T10:55:02Z"
     )]
     fn parse_quote(#[case] crl_path: &str, #[case] crl_chain_path: &str, #[case] exp_date: &str) {
-        let mut f = File::open(crl_path).unwrap();
-        let mut crl_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut crl_buf);
-
-        let mut f = File::open(crl_chain_path).unwrap();
-        let mut crl_chain_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut crl_chain_buf);
-
-        let mut f = File::open("assets/Intel_SGX_Provisioning_Certification_RootCA.cer").unwrap();
-        let mut root_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut root_buf);
+        let crl_buf = load_file(crl_path);
+        let crl_chain_buf = load_file(crl_chain_path);
+        let root_buf = load_root_cert();
 
         let now = DateTime::parse_from_rfc3339(exp_date)
             .unwrap()
@@ -388,17 +391,9 @@ mod should {
         #[case] crl_chain_path: &str,
         #[case] timestamp: &str,
     ) {
-        let mut f = File::open(crl_path).unwrap();
-        let mut crl_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut crl_buf);
-
-        let mut f = File::open(crl_chain_path).unwrap();
-        let mut crl_chain_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut crl_chain_buf);
-
-        let mut f = File::open("assets/Intel_SGX_Provisioning_Certification_RootCA.cer").unwrap();
-        let mut root_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut root_buf);
+        let crl_buf = load_file(crl_path);
+        let crl_chain_buf = load_file(crl_chain_path);
+        let root_buf = load_root_cert();
 
         let now = DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp() as u64;
 
@@ -421,17 +416,9 @@ mod should {
         #[case] crl_chain_path: &str,
         #[case] timestamp: &str,
     ) {
-        let mut f = File::open(crl_path).unwrap();
-        let mut crl_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut crl_buf);
-
-        let mut f = File::open(crl_chain_path).unwrap();
-        let mut crl_chain_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut crl_chain_buf);
-
-        let mut f = File::open("assets/Intel_SGX_Provisioning_Certification_RootCA.cer").unwrap();
-        let mut root_buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut root_buf);
+        let crl_buf = load_file(crl_path);
+        let crl_chain_buf = load_file(crl_chain_path);
+        let root_buf = load_root_cert();
 
         let now = DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp() as u64;
 

@@ -16,7 +16,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-pub use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use spki::ObjectIdentifier;
 
@@ -222,8 +222,8 @@ impl QeReportCertificationData {
     }
 }
 
-pub type TcbSvn = [u8; TCB_SVN_COUNT];
-pub type PceSvn = u16;
+pub(crate) type TcbSvn = [u8; TCB_SVN_COUNT];
+pub(crate) type PceSvn = u16;
 
 #[derive(Debug)]
 struct QuoteBodyV4 {
@@ -553,7 +553,7 @@ impl QuoteSignatureData {
 }
 
 impl QuoteV4 {
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         // HEADER
         let header = QuoteHeader::from_bytes(input)?;
         if header.attestation_key_type != ATTESTATION_KEY_TYPE_ECDSA_256_P256 {
@@ -618,7 +618,7 @@ impl QuoteV4 {
         // - Check the verification collaterals' cert signature chain, including PCK Cert Chain, TCB info chain and QE identity chain
         // - Check if verification collaterals are on the CRL.
         // - Check the TDQE Report signature and the contained AK hash using the PCK Cert.
-        // - Check the measurements of the TDQE contained in the TDQE Report.
+        // - (NOT IMPLEMENTED!) Check the measurements of the TDQE contained in the TDQE Report.
         // - Check the signature of the TD Quote using the public key–part of the AK. Implicitly, this validated
         // the TD and TDX Module measurements.
         // - Evaluate the TDX TCB information contained in the TD Quote.
@@ -653,15 +653,37 @@ mod should {
     use rstest::rstest;
     use std::{fs::File, io::Read};
 
+    fn load_file(path: &str) -> Vec<u8> {
+        let mut f = File::open(path).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        buf
+    }
+
     #[rstest]
     #[case("assets/tests/intel/quote_b0.dat")]
     #[case("assets/tests/intel/quote_90.dat")]
     #[case("assets/tests/intel/quote_no_cert.dat")]
     fn parses_quote(#[case] path: &str) {
-        let mut f = File::open(path).unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
+        let buf = load_file(path);
         assert_ok!(parse_quote(&buf));
+    }
+
+    #[rstest]
+    #[should_panic(expected = "InvalidHeader")]
+    fn parse_truncated_header_fails() {
+        assert_ok!(parse_quote(&[0u8; 1]));
+    }
+
+    #[rstest]
+    #[should_panic(expected = "UnsupportedAttestationKeyType")]
+    fn parse_invalid_header_fails() {
+        let quote_data = load_file("assets/tests/intel/quote_90.dat");
+        let mut invalid_data = quote_data.clone();
+        invalid_data[2] = 0xFF;
+        invalid_data[3] = 0xFF;
+
+        assert_ok!(parse_quote(&invalid_data));
     }
 
     #[rstest]
@@ -674,16 +696,11 @@ mod should {
         "assets/tests/intel/tcb_info_b0.json"
     )]
     fn verify_quote(#[case] quote_path: &str, #[case] coll_path: &str) {
-        let mut f = File::open(quote_path).unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-        let q = parse_quote(&buf).unwrap();
+        let quote_buf = load_file(quote_path);
+        let q = parse_quote(&quote_buf).unwrap();
 
-        let mut f = File::open(coll_path).unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
-        let tcb = parse_tcb_response(&buf).unwrap();
+        let tcb_buf = load_file(coll_path);
+        let tcb = parse_tcb_response(&tcb_buf).unwrap();
         let crl: crate::cert::Crl = vec![];
         let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
         assert_ok!(q.verify(&tcb.tcb_info, &crl, now));
@@ -691,16 +708,11 @@ mod should {
 
     #[test]
     fn reject_quote_wo_certificates() {
-        let mut f = File::open("assets/tests/intel/quote_no_cert.dat").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-        let q = parse_quote(&buf).unwrap();
+        let quote_buf = load_file("assets/tests/intel/quote_no_cert.dat");
+        let q = parse_quote(&quote_buf).unwrap();
 
-        let mut f = File::open("assets/tests/intel/tcb_info_90.json").unwrap();
-        let mut buf = Vec::<u8>::new();
-        let _ = f.read_to_end(&mut buf);
-
-        let tcb = parse_tcb_response(&buf).unwrap();
+        let tcb_buf = load_file("assets/tests/intel/tcb_info_90.json");
+        let tcb = parse_tcb_response(&tcb_buf).unwrap();
         let crl: crate::cert::Crl = vec![];
         let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
         assert_eq!(
