@@ -19,11 +19,14 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![deny(missing_docs)]
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 mod cert;
 mod intel;
 
 pub use crate::{
-    cert::{CertificateError, Crl},
+    cert::{CertificateError, Crl, RevokedCertId},
     intel::{CollateralError, ParseError, QuoteV4, TcbResponse, VerificationError},
 };
 
