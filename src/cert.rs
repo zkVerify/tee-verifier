@@ -28,25 +28,39 @@ use x509_verify::{
     Signature, VerifyInfo, VerifyingKey,
 };
 
+/// Errors that can occur during certificate operations.
 #[derive(Debug)]
 pub enum CertificateError {
+    /// Failed to parse certificate data.
     Parse,
+    /// Public key verification failed.
     KeyVerification,
+    /// The certificate chain is empty.
     EmptyChain,
+    /// The certificate has no extensions.
     NoExtensions,
+    /// A required extension was not found.
     ExtensionNotFound,
+    /// The signature is invalid.
     BadSignature,
+    /// The certificate has been revoked.
     RevokedCertificate,
+    /// The certificate is not yet valid.
     CertificateNotYetValid,
+    /// The certificate has expired.
     CertificateExpired,
 }
 
+/// Identifies a revoked certificate by its issuer and serial number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokedCertId {
+    /// DER-encoded issuer name.
     pub issuer: Vec<u8>,
+    /// Serial number bytes.
     pub serial_number: Vec<u8>,
 }
 
+/// A certificate revocation list as a list of revoked certificate identifiers.
 pub type Crl = Vec<RevokedCertId>;
 
 fn verify_crl(crl: &CertificateList, key: &VerifyingKey) -> Result<(), CertificateError> {
@@ -66,7 +80,7 @@ fn verify_crl(crl: &CertificateList, key: &VerifyingKey) -> Result<(), Certifica
         .map_err(|_| CertificateError::KeyVerification)
 }
 
-pub(crate) fn verify_pem_cert_chain(
+pub fn verify_pem_cert_chain(
     pck_certificate_chain_pem: &Vec<u8>,
     root_cert: Option<&[u8]>,
     crl: Option<&Crl>,
@@ -159,7 +173,7 @@ fn verify_certificate(
         .map_err(|_| CertificateError::KeyVerification)
 }
 
-pub(crate) fn get_ext(
+pub fn get_ext(
     cert: &Certificate,
     oid: ObjectIdentifier,
 ) -> Result<&[u8], CertificateError> {
@@ -176,7 +190,7 @@ pub(crate) fn get_ext(
     Err(CertificateError::ExtensionNotFound)
 }
 
-pub(crate) fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
+pub fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
     let seq = Sequence::decode(data).map_err(|_| CertificateError::ExtensionNotFound)?;
 
     for i in 0..seq.len() {
@@ -198,7 +212,7 @@ pub(crate) fn extract_field(data: &[u8], oid: ObjectIdentifier) -> Result<&[u8],
 
 /// Parse an ASN.1 sequence containing an OID-value pair
 /// Returns (value bytes, total sequence length in bytes)
-pub(crate) fn parse_oid_value_pair<'a>(
+pub fn parse_oid_value_pair<'a>(
     data: &'a [u8],
     oid: &ObjectIdentifier,
 ) -> Result<(&'a [u8], usize), CertificateError> {
@@ -249,7 +263,7 @@ pub(crate) fn parse_oid_value_pair<'a>(
     Ok((val_obj.value(), seq_len))
 }
 
-pub(crate) fn verify_signature(
+pub fn verify_signature(
     cert: &Certificate,
     data: &[u8],
     signature: &[u8],

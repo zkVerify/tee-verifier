@@ -24,9 +24,8 @@ use std::io::Read;
 
 use assert_ok::assert_ok;
 use chrono::DateTime;
-use tee_verifier::cert::{parse_crl, Crl};
-use tee_verifier::intel::collaterals::parse_tcb_response;
-use tee_verifier::intel::quote::{parse_quote, VerificationError};
+
+use tee_verifier::{parse_crl, parse_quote, parse_tcb_response, Crl, VerificationError};
 
 /// Helper function to load a file into a byte vector
 fn load_file(path: &str) -> Vec<u8> {
@@ -75,7 +74,7 @@ mod end_to_end {
 
         // Verify that the tcb data is valid and signed
         let tcb_response = parse_tcb_response(&tcb_data).unwrap();
-        assert_ok!(tcb_response.verify(tcb_chain, now, &crl));
+        assert_ok!(tcb_response.verify(tcb_chain, &crl, now));
 
         // Verify the quote
         let quote = parse_quote(&quote_data).unwrap();

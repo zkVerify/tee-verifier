@@ -22,19 +22,28 @@ use serde::{Deserialize, Serialize};
 use crate::intel::constants::{ECDSA_SIGNATURE_SIZE, MAX_COLLATERAL_SIZE};
 use crate::intel::quote::{PceSvn, TcbSvn};
 
+/// Errors that can occur during collateral verification.
 #[derive(Debug)]
 pub enum CollateralError {
+    /// Failed to parse collateral data.
     Parse,
+    /// The TCB info is invalid.
     InvalidTcb,
+    /// The collateral is not yet valid.
     TooEarly,
+    /// The collateral has expired.
     Expired,
+    /// PCK certificate chain verification failed.
     PKCChain,
+    /// The signature is invalid.
     BadSignature,
 }
 
+/// A signed TCB info response from Intel.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TcbResponse {
+    /// The TCB info payload.
     pub tcb_info: TcbInfo,
     signature: String,
 }
@@ -50,14 +59,14 @@ pub struct TcbInfo {
     pub pce_id: String,
     pub tcb_type: u32,
     pub tcb_evaluation_data_number: u32,
-    pub(crate) tdx_module: TdxModule,
-    pub(crate) tdx_module_identities: Vec<TdxModuleIdentity>,
-    pub(crate) tcb_levels: Vec<TcbLevel>,
+    pub tdx_module: TdxModule,
+    pub tdx_module_identities: Vec<TdxModuleIdentity>,
+    pub tcb_levels: Vec<TcbLevel>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TdxModule {
+pub struct TdxModule {
     pub mrsigner: String,
     pub attributes: String,
     pub attributes_mask: String,
@@ -65,7 +74,7 @@ pub(crate) struct TdxModule {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TdxModuleIdentity {
+pub struct TdxModuleIdentity {
     pub id: String,
     pub mrsigner: String,
     pub attributes: String,
@@ -75,7 +84,7 @@ pub(crate) struct TdxModuleIdentity {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TcbLevel {
+pub struct TcbLevel {
     pub tcb: Tcb,
     pub tcb_date: String,
     pub tcb_status: TcbStatus,
@@ -86,7 +95,7 @@ pub(crate) struct TcbLevel {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Tcb {
+pub struct Tcb {
     #[serde(rename = "isvsvn")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isv_svn: Option<u16>, // from the docs, "integer"
@@ -103,7 +112,7 @@ pub(crate) struct Tcb {
 
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TcbComponents {
+pub struct TcbComponents {
     pub svn: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -136,11 +145,12 @@ pub enum TcbStatus {
 }
 
 impl TcbResponse {
+    /// Verify the TCB response signature and validity period.
     pub fn verify(
         &self,
         certs: Vec<u8>,
-        now: u64,
         crl: &crate::cert::Crl,
+        now: u64,
     ) -> Result<(), CollateralError> {
         let cert = crate::cert::verify_pem_cert_chain(
             &certs,
@@ -186,7 +196,7 @@ pub fn parse_tcb_response(input: &[u8]) -> Result<TcbResponse, CollateralError> 
     Ok(tcb_response)
 }
 
-pub(crate) fn compare_tcb_levels(
+pub fn compare_tcb_levels(
     quote_tcb: &TcbSvn,
     levels: &Vec<TcbLevel>,
 ) -> (TcbStatus, PceSvn) {
@@ -251,7 +261,7 @@ mod should {
             .unwrap()
             .timestamp() as u64;
         let crl: crate::cert::Crl = vec![];
-        assert_ok!(tcb.verify(chain_buf, time, &crl));
+        assert_ok!(tcb.verify(chain_buf, &crl, time));
     }
 
     #[test]

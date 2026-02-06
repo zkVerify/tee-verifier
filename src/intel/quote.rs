@@ -23,33 +23,57 @@ use spki::ObjectIdentifier;
 use crate::intel::collaterals::{TcbInfo, TcbLevel, TcbStatus};
 use crate::intel::constants::*;
 
+/// Errors that can occur when parsing a quote.
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
+    /// The quote header is invalid or too short.
     InvalidHeader,
+    /// The QE authentication data is invalid.
     InvalidAuthenticationData,
+    /// The QE report is invalid.
     InvalidQeReport,
+    /// The QE report signature is invalid.
     InvalidQeReportSignature,
+    /// The quote body is invalid or too short.
     InvalidBody,
+    /// The certification data is invalid.
     InvalidCertificationData,
+    /// The signature data is invalid.
     InvalidSignatureData,
+    /// The attestation key type is not supported.
     UnsupportedAttestationKeyType,
+    /// The certification data type is not supported.
     UnsupportedCertificationDataType,
+    /// The QE vendor ID is not recognized.
     UnsupportedVendorId,
 }
 
+/// Errors that can occur when verifying a quote.
 #[derive(Debug, PartialEq)]
 pub enum VerificationError {
+    /// Quote verification failed.
     FailedVerification,
+    /// The verification type is not supported.
     UnsupportedVerificationType,
+    /// P-256 elliptic curve error.
     P256Error,
+    /// PCK certificate chain verification failed.
     PKCChain,
+    /// Failed to extract Intel SGX extensions from the certificate.
     CannotExtractIntelExtensions,
+    /// Failed to extract the FMSPC value.
     CannotExtractFmspc,
+    /// The FMSPC value does not match the expected value.
     FmspcMismatch,
+    /// The TD is running in debug mode.
     DebugModeEnabled,
+    /// The TCB status is not acceptable.
     BadTcbStatus(TcbStatus),
+    /// The PCE SVN status is not acceptable.
     BadPceStatus,
+    /// The signature is invalid.
     BadSignature,
+    /// The QE report data is invalid.
     InvalidQeReportData,
 }
 
@@ -222,8 +246,8 @@ impl QeReportCertificationData {
     }
 }
 
-pub(crate) type TcbSvn = [u8; TCB_SVN_COUNT];
-pub(crate) type PceSvn = u16;
+pub type TcbSvn = [u8; TCB_SVN_COUNT];
+pub type PceSvn = u16;
 
 #[derive(Debug)]
 struct QuoteBodyV4 {
@@ -343,6 +367,7 @@ impl QuoteBodyV4 {
     }
 }
 
+/// A parsed Intel TDX Quote v4.
 pub struct QuoteV4 {
     header: QuoteHeader,
     body: QuoteBodyV4,
@@ -606,6 +631,7 @@ impl QuoteV4 {
         status
     }
 
+    /// Verify the quote against the provided TCB info and CRL.
     pub fn verify(
         &self,
         tcb: &TcbInfo,

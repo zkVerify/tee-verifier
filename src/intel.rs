@@ -16,6 +16,18 @@
 static ROOT_CERT: &[u8] =
     include_bytes!("../assets/Intel_SGX_Provisioning_Certification_RootCA.cer");
 
-pub mod collaterals;
-pub mod constants;
-pub mod quote;
+mod collaterals;
+mod constants;
+mod quote;
+
+pub use collaterals::{CollateralError, TcbResponse};
+pub use quote::{ParseError, QuoteV4, VerificationError};
+
+/// Parse a TCB response from JSON bytes.
+pub fn parse_tcb_response(input: &[u8]) -> Result<TcbResponse, CollateralError> {
+    collaterals::parse_tcb_response(input)
+}
+
+pub fn parse_quote(input: &[u8]) -> Result<QuoteV4, ParseError> {
+    quote::parse_quote(input)
+}

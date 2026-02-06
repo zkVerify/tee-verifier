@@ -130,7 +130,6 @@ pub const SIGNATURE_DATA_LEN_SIZE: usize = 4;
 // =============================================================================
 
 pub const TCB_SVN_COUNT: usize = 16;
-pub const TCB_CHUNK_SIZE: usize = 18;
 pub const FMSPC_SIZE: usize = 6;
 
 // =============================================================================
