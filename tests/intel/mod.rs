@@ -25,7 +25,7 @@ use std::io::Read;
 use assert_ok::assert_ok;
 use chrono::DateTime;
 
-use tee_verifier::{parse_crl, parse_quote, parse_tcb_response, Crl, VerificationError};
+use tee_verifier::{parse_pem_crl, parse_quote, parse_tcb_response, Crl, VerificationError};
 
 /// Helper function to load a file into a byte vector
 fn load_file(path: &str) -> Vec<u8> {
@@ -70,7 +70,7 @@ mod end_to_end {
 
         let now = parse_timestamp("2026-02-03T09:32:53Z");
 
-        let (_crl_time, crl) = parse_crl(&crl_data, &crl_chain, Some(&root_cert), now).unwrap();
+        let (_crl_time, crl) = parse_pem_crl(&crl_data, &crl_chain, Some(&root_cert), now).unwrap();
 
         // Verify that the tcb data is valid and signed
         let tcb_response = parse_tcb_response(&tcb_data).unwrap();
