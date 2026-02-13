@@ -495,7 +495,7 @@ impl QeCertificationData {
                 let (cert_tcb, cert_pce) = Self::extract_tcb_info(cert_tcb, tcb_oid)
                     .map_err(|_| VerificationError::CannotExtractIntelExtensions)?;
                 let (tcb_status, pce_svn) =
-                    crate::intel::collaterals::compare_tcb_levels(&cert_tcb, &tcb.tcb_levels);
+                    crate::intel::collaterals::compare_sgx_tcb_levels(&cert_tcb, &tcb.tcb_levels);
                 if tcb_status >= TcbStatus::Revoked {
                     return Err(VerificationError::BadTcbStatus(tcb_status));
                 }
@@ -714,12 +714,13 @@ mod should {
 
     #[rstest]
     #[case(
-        "assets/tests/intel/quote_90.dat",
-        "assets/tests/intel/tcb_info_90.json"
-    )]
-    #[case(
         "assets/tests/intel/quote_b0.dat",
         "assets/tests/intel/tcb_info_b0.json"
+    )]
+    #[should_panic(expected = "BadTcbStatus")]
+    #[case(
+        "assets/tests/intel/quote_90.dat",
+        "assets/tests/intel/tcb_info_90.json"
     )]
     fn verify_quote(#[case] quote_path: &str, #[case] coll_path: &str) {
         let quote_buf = load_file(quote_path);

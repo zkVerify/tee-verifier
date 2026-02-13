@@ -173,10 +173,7 @@ fn verify_certificate(
         .map_err(|_| CertificateError::KeyVerification)
 }
 
-pub fn get_ext(
-    cert: &Certificate,
-    oid: ObjectIdentifier,
-) -> Result<&[u8], CertificateError> {
+pub fn get_ext(cert: &Certificate, oid: ObjectIdentifier) -> Result<&[u8], CertificateError> {
     if cert.tbs_certificate.extensions.is_none() {
         return Err(CertificateError::NoExtensions);
     }

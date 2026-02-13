@@ -55,11 +55,11 @@ mod end_to_end {
     #[test]
     fn verify_quote() {
         // Load quote data
-        let quote_data = load_file("assets/tests/intel/quote_90.dat");
+        let quote_data = load_file("assets/tests/intel/quote_b0.dat");
 
         // Load tcb data
-        let tcb_data = load_file("assets/tests/intel/tcb_info_90.json");
-        let tcb_chain = load_file("assets/tests/intel/tcb_info_90.pem");
+        let tcb_data = load_file("assets/tests/intel/tcb_info_b0.json");
+        let tcb_chain = load_file("assets/tests/intel/tcb_info_b0.pem");
 
         // Load Certificate Revocation List data
         let crl_data = load_file("assets/tests/intel/crl.pem");

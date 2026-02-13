@@ -196,10 +196,7 @@ pub fn parse_tcb_response(input: &[u8]) -> Result<TcbResponse, CollateralError> 
     Ok(tcb_response)
 }
 
-pub fn compare_tcb_levels(
-    quote_tcb: &TcbSvn,
-    levels: &Vec<TcbLevel>,
-) -> (TcbStatus, PceSvn) {
+pub fn compare_tcb_levels(quote_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbStatus, PceSvn) {
     // Compare SVNs in TEE TCB SVN array retrieved from TD Report in Quote (from index 0 to 15 if TEE TCB SVN at index 1 is set to 0, or from index 2 to 15 otherwise) with the corresponding values of SVNs in tdxtcbcomponents array of TCB Level. If all TEE TCB SVNs in the TD Report are greater or equal to the corresponding values in TCB Level, read tcbStatus assigned to this TCB level. Otherwise, move to the next item on TCB Levels list.
     for tcb_level in levels {
         if tcb_level.tcb.tdx_components.is_none() {
@@ -227,6 +224,32 @@ pub fn compare_tcb_levels(
             continue;
         }
         return (tcb_level.tcb_status.clone(), 0);
+    }
+    (TcbStatus::Revoked, 0)
+}
+
+/// Compare SGX TCB SVNs extracted from the PCK certificate against the
+/// sgxtcbcomponents in each TCB level of the collateral.
+pub fn compare_sgx_tcb_levels(cert_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbStatus, PceSvn) {
+    for tcb_level in levels {
+        let Some(coll_tcb) = tcb_level.tcb.sgx_components.as_ref() else {
+            continue;
+        };
+        if cert_tcb.len() != coll_tcb.len() {
+            continue;
+        }
+        let mut t = 0;
+        while t < cert_tcb.len() {
+            if coll_tcb[t] > cert_tcb[t] {
+                break;
+            }
+            t += 1;
+        }
+        if t < cert_tcb.len() {
+            continue;
+        }
+        let pce = tcb_level.tcb.pce_svn.unwrap_or(0);
+        return (tcb_level.tcb_status.clone(), pce);
     }
     (TcbStatus::Revoked, 0)
 }
