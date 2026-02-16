@@ -23,6 +23,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Install latest stable
         uses: dtolnay/rust-toolchain@stable
+      - name: Install latest nightly
+        uses: dtolnay/rust-toolchain@nightly # udeps
       - name: Install cargo-make
         run: cargo install --debug cargo-make
       - name: Run CI full
