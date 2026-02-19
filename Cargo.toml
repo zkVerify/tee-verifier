@@ -6,8 +6,8 @@ repository = "https://github.com/zkVerify/tee-verifier"
 homepage = "https://horizenlabs.io"
 keywords = ["cryptography", "elliptic-curves", "pairing", "zk-SNARKs"]
 categories = ["cryptography"]
-include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
-license = "MIT/Apache-2.0"
+include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE2"]
+license = "Apache-2.0"
 edition = "2021"
 
 [dependencies]
