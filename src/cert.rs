@@ -49,6 +49,8 @@ pub enum CertificateError {
     CertificateNotYetValid,
     /// The certificate has expired.
     CertificateExpired,
+    /// Expected exactly one CRL, but found multiple.
+    MultipleCrls,
 }
 
 /// Identifies a revoked certificate by its issuer and serial number.
@@ -315,8 +317,6 @@ fn process_crl(
 ) -> Result<(u64, Crl), CertificateError> {
     verify_crl(crl, sign_key)?;
 
-    let this_update = crl.tbs_cert_list.this_update.to_unix_duration().as_secs();
-
     let issuer = crl
         .tbs_cert_list
         .issuer
@@ -333,6 +333,7 @@ fn process_crl(
         }
     }
 
+    let this_update = crl.tbs_cert_list.this_update.to_unix_duration().as_secs();
     Ok((this_update, revoked_certs))
 }
 
@@ -353,27 +354,19 @@ pub fn parse_pem_crl(
     now: u64,
 ) -> Result<(u64, Crl), CertificateError> {
     let pems = pem::parse_many(crl_pem).map_err(|_| CertificateError::Parse)?;
-    let crls: Result<Vec<CertificateList>, _> = pems
-        .into_iter()
-        .map(|pem| CertificateList::from_der(pem.contents()))
-        .collect();
-    let crls = crls.map_err(|_| CertificateError::Parse)?;
+    if pems.is_empty() {
+        return Err(CertificateError::Parse);
+    }
+    if pems.len() > 1 {
+        return Err(CertificateError::MultipleCrls);
+    }
+    let crl =
+        CertificateList::from_der(pems[0].contents()).map_err(|_| CertificateError::Parse)?;
 
     let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None, now)?;
     let sign_key = signing_key_from_cert(&sign_cert)?;
 
-    let mut revoked_certs: Crl = Vec::new();
-    let mut latest_this_update: u64 = 0;
-
-    for crl in &crls {
-        let (this_update, entries) = process_crl(crl, &sign_key)?;
-        if this_update > latest_this_update {
-            latest_this_update = this_update;
-        }
-        revoked_certs.extend(entries);
-    }
-
-    Ok((latest_this_update, revoked_certs))
+    process_crl(&crl, &sign_key)
 }
 
 pub fn parse_der_crl(
@@ -511,6 +504,23 @@ mod should {
 
         let result = parse_pem_crl(&crl_buf, &crl_chain_buf, Some(&root_buf), now);
         assert!(matches!(result, Err(CertificateError::CertificateExpired)));
+    }
+
+    #[test]
+    fn reject_multiple_crls() {
+        let crl_buf = load_file("assets/tests/intel/crl.pem");
+        let crl_chain_buf = load_file("assets/tests/intel/crl_chain.pem");
+        let root_buf = load_intel_root_cert();
+        let now = DateTime::parse_from_rfc3339("2026-02-03T09:32:53Z")
+            .unwrap()
+            .timestamp() as u64;
+
+        // Concatenate two copies of the same CRL PEM
+        let mut double_crl = crl_buf.clone();
+        double_crl.extend_from_slice(&crl_buf);
+
+        let result = parse_pem_crl(&double_crl, &crl_chain_buf, Some(&root_buf), now);
+        assert!(matches!(result, Err(CertificateError::MultipleCrls)));
     }
 
     #[test]
