@@ -84,7 +84,7 @@ pub struct NitroAttestation {
 }
 
 /// Parse a Nitro attestation document from binary COSE_Sign1 data.
-pub fn parse_nitro_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseError> {
+pub fn parse_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseError> {
     // Decode COSE_Sign1 — accept both tagged (CBOR tag 18) and untagged forms
     let cose_sign1 = CoseSign1::from_tagged_slice(input)
         .or_else(|_| CoseSign1::from_slice(input))
@@ -180,7 +180,7 @@ impl NitroAttestation {
         }
 
         // Verify the certificate chain against the embedded AWS root
-        let leaf = crate::cert::verify_der_cert_chain(
+        let leaf = crate::cert::verify_cert_chain_der(
             &chain_refs,
             Some(crate::nitro::ROOT_CERT),
             crl,

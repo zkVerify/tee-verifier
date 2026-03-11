@@ -461,7 +461,7 @@ impl QeCertificationData {
     ) -> Result<(), VerificationError> {
         match self.certification_data_type {
             CERT_DATA_TYPE_PCK_CHAIN => {
-                let cert = crate::cert::verify_pem_cert_chain(
+                let cert = crate::cert::verify_cert_chain_pem(
                     &self.certification_data,
                     Some(crate::intel::ROOT_CERT),
                     Some(crl),

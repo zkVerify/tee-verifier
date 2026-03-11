@@ -20,6 +20,6 @@ mod attestation;
 pub use attestation::{NitroAttestation, NitroParseError, NitroVerificationError};
 
 /// Parse a Nitro attestation document from binary COSE_Sign1 data.
-pub fn parse_nitro_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseError> {
-    attestation::parse_nitro_attestation(input)
+pub fn parse_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseError> {
+    attestation::parse_attestation(input)
 }

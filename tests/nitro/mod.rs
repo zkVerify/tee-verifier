@@ -24,7 +24,7 @@ use std::io::Read;
 use assert_ok::assert_ok;
 
 use tee_verifier::{
-    parse_der_crl, parse_nitro_attestation, Crl, NitroParseError, NitroVerificationError,
+    parse_crl_der, nitro_parse_attestation, Crl, NitroParseError, NitroVerificationError,
 };
 
 /// Helper function to load a file into a byte vector
@@ -44,20 +44,20 @@ mod nitro_parsing {
 
     #[test]
     fn parse_empty_input_fails() {
-        let result = parse_nitro_attestation(&[]);
+        let result = nitro_parse_attestation(&[]);
         assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
     }
 
     #[test]
     fn parse_invalid_cbor_fails() {
-        let result = parse_nitro_attestation(&[0xFF, 0xFF, 0xFF]);
+        let result = nitro_parse_attestation(&[0xFF, 0xFF, 0xFF]);
         assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
     }
 
     #[test]
     fn parse_valid_attestation_doc() {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = assert_ok!(parse_nitro_attestation(&data));
+        let att = assert_ok!(nitro_parse_attestation(&data));
 
         assert_eq!(att.module_id, "i-04fd167167daacf3b-enc01845e97d0b3eb4e");
         assert_eq!(att.digest, "SHA384");
@@ -73,7 +73,7 @@ mod nitro_parsing {
     #[test]
     fn parse_valid_attestation_doc_2() {
         let data = load_file("assets/tests/nitro/attestation_doc_2.bin");
-        let att = assert_ok!(parse_nitro_attestation(&data));
+        let att = assert_ok!(nitro_parse_attestation(&data));
 
         assert_eq!(att.module_id, "i-0a22e5c5f24d22174-enc0191cceb4289903f");
         assert_eq!(att.digest, "SHA384");
@@ -95,7 +95,7 @@ mod end_to_end {
     #[test]
     fn verify_attestation_doc() {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = parse_nitro_attestation(&data).unwrap();
+        let att = nitro_parse_attestation(&data).unwrap();
 
         // Use the document's own timestamp (converted from ms to seconds)
         // since the embedded certificates have a short validity window.
@@ -107,7 +107,7 @@ mod end_to_end {
     #[test]
     fn verify_attestation_doc_2() {
         let data = load_file("assets/tests/nitro/attestation_doc_2.bin");
-        let att = parse_nitro_attestation(&data).unwrap();
+        let att = nitro_parse_attestation(&data).unwrap();
 
         // 2024-09-07T14:37:39Z
         let now = att.timestamp / 1000;
@@ -118,7 +118,7 @@ mod end_to_end {
     fn verify_attestation_doc_with_crl() {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
         let nitro_root = load_file("assets/aws_nitro_root_g1.der");
-        let att = parse_nitro_attestation(&data).unwrap();
+        let att = nitro_parse_attestation(&data).unwrap();
 
         // 2022-11-09T22:52:00Z
         let now = att.timestamp / 1000;
@@ -138,9 +138,9 @@ mod end_to_end {
             .collect();
 
         let (_time1, crl1) =
-            parse_der_crl(&root_crl_data, &att.cabundle[0], Some(&nitro_root), now).unwrap();
+            parse_crl_der(&root_crl_data, &att.cabundle[0], Some(&nitro_root), now).unwrap();
         let (_time2, crl2) =
-            parse_der_crl(&zonal_crl_data, &zonal_chain, Some(&nitro_root), now).unwrap();
+            parse_crl_der(&zonal_crl_data, &zonal_chain, Some(&nitro_root), now).unwrap();
 
         let mut crl: Crl = crl1;
         crl.extend(crl2);
@@ -159,7 +159,7 @@ mod verification_errors {
     #[test]
     fn verify_bad_signature_fails() {
         let data = load_file("assets/tests/nitro/attestation_doc_bad_sig.bin");
-        let att = parse_nitro_attestation(&data).unwrap();
+        let att = nitro_parse_attestation(&data).unwrap();
 
         // 2022-11-09T22:52:00Z
         let now = att.timestamp / 1000;
@@ -170,7 +170,7 @@ mod verification_errors {
     #[test]
     fn verify_with_expired_timestamp_fails() {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = parse_nitro_attestation(&data).unwrap();
+        let att = nitro_parse_attestation(&data).unwrap();
 
         // One year after the document timestamp — certificates will have expired.
         // ~2023-11-09
@@ -185,7 +185,7 @@ mod verification_errors {
     #[test]
     fn verify_with_past_timestamp_fails() {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = parse_nitro_attestation(&data).unwrap();
+        let att = nitro_parse_attestation(&data).unwrap();
 
         // 1970-01-01T00:00:00Z — certificates will not yet be valid.
         let now = 0;

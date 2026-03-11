@@ -152,7 +152,7 @@ impl TcbResponse {
         crl: &crate::cert::Crl,
         now: u64,
     ) -> Result<(), CollateralError> {
-        let cert = crate::cert::verify_pem_cert_chain(
+        let cert = crate::cert::verify_cert_chain_pem(
             &certs,
             Some(crate::intel::ROOT_CERT),
             Some(crl),
@@ -230,10 +230,7 @@ pub fn compare_tcb_levels(quote_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbSta
 
 /// Compare SGX TCB SVNs extracted from the PCK certificate against the
 /// sgxtcbcomponents in each TCB level of the collateral.
-pub fn compare_sgx_tcb_levels(
-    cert_tcb: &TcbSvn,
-    levels: &Vec<TcbLevel>,
-) -> (TcbStatus, PceSvn) {
+pub fn compare_sgx_tcb_levels(cert_tcb: &TcbSvn, levels: &Vec<TcbLevel>) -> (TcbStatus, PceSvn) {
     for tcb_level in levels {
         let Some(coll_tcb) = tcb_level.tcb.sgx_components.as_ref() else {
             continue;
