@@ -25,7 +25,9 @@ use std::io::Read;
 use assert_ok::assert_ok;
 use chrono::DateTime;
 
-use tee_verifier::{parse_crl_pem, intel_parse_quote, intel_parse_tcb_response, Crl, VerificationError};
+use tee_verifier::{
+    intel_parse_quote, intel_parse_tcb_response, parse_crl_pem, Crl, VerificationError,
+};
 
 /// Helper function to load a file into a byte vector
 fn load_file(path: &str) -> Vec<u8> {

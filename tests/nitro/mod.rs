@@ -24,7 +24,7 @@ use std::io::Read;
 use assert_ok::assert_ok;
 
 use tee_verifier::{
-    parse_crl_der, nitro_parse_attestation, Crl, NitroParseError, NitroVerificationError,
+    nitro_parse_attestation, parse_crl_der, Crl, NitroParseError, NitroVerificationError,
 };
 
 /// Helper function to load a file into a byte vector
@@ -75,13 +75,14 @@ mod nitro_parsing {
         let data = load_file("assets/tests/nitro/attestation_doc_2.bin");
         let att = assert_ok!(nitro_parse_attestation(&data));
 
-        assert_eq!(att.module_id, "i-0a22e5c5f24d22174-enc0191cceb4289903f");
+        assert_eq!(att.module_id, "i-07a18ebd3db1ea8f6-enc019c28bed89f04b9");
         assert_eq!(att.digest, "SHA384");
-        // 2024-09-07T14:37:39.545Z
-        assert_eq!(att.timestamp, 1725719859545);
+        // 2026-02-13T16:29:13.369Z
+        assert_eq!(att.timestamp, 1771000153369);
         assert_eq!(att.pcrs.len(), 16);
         assert!(att.public_key.is_some());
-        assert!(att.nonce.is_some());
+        assert!(att.user_data.is_some());
+        assert!(att.nonce.is_none());
     }
 }
 
@@ -109,7 +110,7 @@ mod end_to_end {
         let data = load_file("assets/tests/nitro/attestation_doc_2.bin");
         let att = nitro_parse_attestation(&data).unwrap();
 
-        // 2024-09-07T14:37:39Z
+        // 2026-02-13T16:29:13Z
         let now = att.timestamp / 1000;
         assert_ok!(att.verify(None, now));
     }
