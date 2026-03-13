@@ -1,4 +1,4 @@
-// Copyright 2025, Horizen Labs, Inc.
+// Copyright 2026, Horizen Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -173,7 +173,7 @@ mod verification_errors {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
         let att = nitro_parse_attestation(&data).unwrap();
 
-        // One year after the document timestamp — certificates will have expired.
+        // One year after the document timestamp certificates will have expired.
         // ~2023-11-09
         let now = att.timestamp / 1000 + 365 * 24 * 3600;
         let result = att.verify(None, now);
@@ -188,7 +188,7 @@ mod verification_errors {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
         let att = nitro_parse_attestation(&data).unwrap();
 
-        // 1970-01-01T00:00:00Z — certificates will not yet be valid.
+        // 1970-01-01T00:00:00Z certificates will not yet be valid.
         let now = 0;
         let result = att.verify(None, now);
         assert!(matches!(
