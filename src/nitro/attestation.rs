@@ -33,8 +33,6 @@ pub enum NitroParseError {
     MissingField(&'static str),
     /// A field has an unexpected type or value.
     InvalidField(&'static str),
-    /// A certificate in the document could not be parsed.
-    InvalidCertificate,
     /// The COSE protected header specifies an unsupported algorithm.
     UnsupportedAlgorithm,
 }
@@ -46,10 +44,6 @@ pub enum NitroVerificationError {
     BadSignature,
     /// The certificate chain verification failed.
     CertificateChain,
-    /// A certificate in the chain has expired or is not yet valid.
-    CertificateExpired,
-    /// The enclave is running in debug mode.
-    DebugMode,
     /// The leaf certificate's public key could not be extracted.
     InvalidPublicKey,
     /// The attestation document's digest algorithm is not "SHA384".
@@ -343,19 +337,7 @@ mod should {
         use super::*;
 
         #[test]
-        fn parse_empty_input_fails() {
-            let result = parse_attestation(&[]);
-            assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
-        }
-
-        #[test]
-        fn parse_invalid_cbor_fails() {
-            let result = parse_attestation(&[0xFF, 0xFF, 0xFF]);
-            assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
-        }
-
-        #[test]
-        fn parse_valid_attestation_doc() {
+        fn valid_attestation_doc() {
             let data = load_file("assets/tests/nitro/attestation_doc.bin");
             let att = assert_ok!(parse_attestation(&data));
 
@@ -371,7 +353,7 @@ mod should {
         }
 
         #[test]
-        fn parse_valid_attestation_doc_2() {
+        fn valid_attestation_doc_2() {
             let data = load_file("assets/tests/nitro/attestation_doc_2.bin");
             let att = assert_ok!(parse_attestation(&data));
 
@@ -442,6 +424,20 @@ mod should {
         }
 
         #[test]
+        fn verify_unsupported_digest_fails() {
+            let data = load_file("assets/tests/nitro/attestation_doc.bin");
+            let mut att = parse_attestation(&data).unwrap();
+            att.digest = String::from("SHA256");
+
+            let now = att.timestamp / 1000;
+            let result = att.verify(None, now);
+            assert!(matches!(
+                result,
+                Err(NitroVerificationError::UnsupportedDigest)
+            ));
+        }
+
+        #[test]
         fn verify_with_past_timestamp_fails() {
             let data = load_file("assets/tests/nitro/attestation_doc.bin");
             let att = parse_attestation(&data).unwrap();
@@ -452,6 +448,120 @@ mod should {
             assert!(matches!(
                 result,
                 Err(NitroVerificationError::CertificateChain)
+            ));
+        }
+    }
+
+    mod parse_errors {
+        use super::*;
+
+        fn build_cose_sign1(payload: &[u8]) -> Vec<u8> {
+            let mut sign1 = CoseSign1::default();
+            sign1.protected.header.alg = Some(coset::RegisteredLabelWithPrivate::Assigned(
+                coset::iana::Algorithm::ES384,
+            ));
+            sign1.payload = Some(payload.to_vec());
+            sign1.signature = vec![0u8; 96];
+            sign1.to_tagged_vec().unwrap()
+        }
+
+        fn build_payload(overrides: &[(&str, Option<ciborium::Value>)]) -> Vec<u8> {
+            let mut fields: Vec<(&str, ciborium::Value)> = vec![
+                ("module_id", ciborium::Value::Text("test-module".into())),
+                ("digest", ciborium::Value::Text("SHA384".into())),
+                ("timestamp", ciborium::Value::Integer(1000000u64.into())),
+                (
+                    "pcrs",
+                    ciborium::Value::Map(vec![(
+                        ciborium::Value::Integer(0.into()),
+                        ciborium::Value::Bytes(vec![0u8; 48]),
+                    )]),
+                ),
+                ("certificate", ciborium::Value::Bytes(vec![0u8; 32])),
+                (
+                    "cabundle",
+                    ciborium::Value::Array(vec![ciborium::Value::Bytes(vec![0u8; 32])]),
+                ),
+            ];
+
+            for (key, val) in overrides {
+                fields.retain(|(k, _)| k != key);
+                if let Some(v) = val {
+                    fields.push((key, v.clone()));
+                }
+            }
+
+            let map = ciborium::Value::Map(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (ciborium::Value::Text(k.into()), v))
+                    .collect(),
+            );
+            let mut buf = Vec::new();
+            ciborium::into_writer(&map, &mut buf).unwrap();
+            buf
+        }
+
+        #[test]
+        fn empty_input() {
+            let result = parse_attestation(&[]);
+            assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
+        }
+
+        #[test]
+        fn invalid_cose_sign1() {
+            let result = parse_attestation(&[0xFF, 0xFF, 0xFF]);
+            assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
+        }
+
+        #[test]
+        fn unsupported_algorithm() {
+            let mut sign1 = CoseSign1::default();
+            sign1.protected.header.alg = Some(coset::RegisteredLabelWithPrivate::Assigned(
+                coset::iana::Algorithm::ES256,
+            ));
+            sign1.payload = Some(vec![0u8]);
+            sign1.signature = vec![0u8; 64];
+            let data = sign1.to_tagged_vec().unwrap();
+
+            let result = parse_attestation(&data);
+            assert!(matches!(result, Err(NitroParseError::UnsupportedAlgorithm)));
+        }
+
+        #[test]
+        fn invalid_payload() {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&ciborium::Value::Array(vec![]), &mut buf).unwrap();
+            let data = build_cose_sign1(&buf);
+
+            let result = parse_attestation(&data);
+            assert!(matches!(result, Err(NitroParseError::InvalidPayload)));
+        }
+
+        #[test]
+        fn missing_field() {
+            let payload = build_payload(&[("module_id", None)]);
+            let data = build_cose_sign1(&payload);
+
+            let result = parse_attestation(&data);
+            assert!(matches!(
+                result,
+                Err(NitroParseError::MissingField("module_id"))
+            ));
+        }
+
+        #[test]
+        fn invalid_field() {
+            let payload = build_payload(&[(
+                "timestamp",
+                Some(ciborium::Value::Text("not a number".into())),
+            )]);
+            let data = build_cose_sign1(&payload);
+
+            let result = parse_attestation(&data);
+            assert!(matches!(
+                result,
+                Err(NitroParseError::InvalidField("timestamp"))
             ));
         }
     }

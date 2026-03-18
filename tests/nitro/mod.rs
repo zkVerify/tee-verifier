@@ -23,9 +23,7 @@ use std::io::Read;
 
 use assert_ok::assert_ok;
 
-use tee_verifier::{
-    nitro_parse_attestation, parse_crl_der, Crl,
-};
+use tee_verifier::{nitro_parse_attestation, parse_crl_der, Crl};
 
 /// Helper function to load a file into a byte vector
 fn load_file(path: &str) -> Vec<u8> {
@@ -90,5 +88,3 @@ mod end_to_end {
         assert_ok!(att.verify(Some(&crl), now));
     }
 }
-
-
