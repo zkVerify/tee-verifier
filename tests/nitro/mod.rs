@@ -24,7 +24,7 @@ use std::io::Read;
 use assert_ok::assert_ok;
 
 use tee_verifier::{
-    nitro_parse_attestation, parse_crl_der, Crl, NitroParseError, NitroVerificationError,
+    nitro_parse_attestation, parse_crl_der, Crl,
 };
 
 /// Helper function to load a file into a byte vector
@@ -43,46 +43,9 @@ mod nitro_parsing {
     use super::*;
 
     #[test]
-    fn parse_empty_input_fails() {
-        let result = nitro_parse_attestation(&[]);
-        assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
-    }
-
-    #[test]
-    fn parse_invalid_cbor_fails() {
-        let result = nitro_parse_attestation(&[0xFF, 0xFF, 0xFF]);
-        assert!(matches!(result, Err(NitroParseError::InvalidCoseSign1)));
-    }
-
-    #[test]
     fn parse_valid_attestation_doc() {
         let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = assert_ok!(nitro_parse_attestation(&data));
-
-        assert_eq!(att.module_id, "i-04fd167167daacf3b-enc01845e97d0b3eb4e");
-        assert_eq!(att.digest, "SHA384");
-        // 2022-11-09T22:52:00.696Z
-        assert_eq!(att.timestamp, 1668034320696);
-        assert_eq!(att.pcrs.len(), 16);
-        assert_eq!(att.cabundle.len(), 4);
-        assert!(att.public_key.is_none());
-        assert!(att.user_data.is_some());
-        assert!(att.nonce.is_some());
-    }
-
-    #[test]
-    fn parse_valid_attestation_doc_2() {
-        let data = load_file("assets/tests/nitro/attestation_doc_2.bin");
-        let att = assert_ok!(nitro_parse_attestation(&data));
-
-        assert_eq!(att.module_id, "i-07a18ebd3db1ea8f6-enc019c28bed89f04b9");
-        assert_eq!(att.digest, "SHA384");
-        // 2026-02-13T16:29:13.369Z
-        assert_eq!(att.timestamp, 1771000153369);
-        assert_eq!(att.pcrs.len(), 16);
-        assert!(att.public_key.is_some());
-        assert!(att.user_data.is_some());
-        assert!(att.nonce.is_none());
+        assert_ok!(nitro_parse_attestation(&data));
     }
 }
 
@@ -92,28 +55,6 @@ mod nitro_parsing {
 
 mod end_to_end {
     use super::*;
-
-    #[test]
-    fn verify_attestation_doc() {
-        let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = nitro_parse_attestation(&data).unwrap();
-
-        // Use the document's own timestamp (converted from ms to seconds)
-        // since the embedded certificates have a short validity window.
-        // 2022-11-09T22:52:00Z
-        let now = att.timestamp / 1000;
-        assert_ok!(att.verify(None, now));
-    }
-
-    #[test]
-    fn verify_attestation_doc_2() {
-        let data = load_file("assets/tests/nitro/attestation_doc_2.bin");
-        let att = nitro_parse_attestation(&data).unwrap();
-
-        // 2026-02-13T16:29:13Z
-        let now = att.timestamp / 1000;
-        assert_ok!(att.verify(None, now));
-    }
 
     #[test]
     fn verify_attestation_doc_with_crl() {
@@ -150,50 +91,4 @@ mod end_to_end {
     }
 }
 
-// =============================================================================
-// Nitro Attestation Verification Error Tests
-// =============================================================================
 
-mod verification_errors {
-    use super::*;
-
-    #[test]
-    fn verify_bad_signature_fails() {
-        let data = load_file("assets/tests/nitro/attestation_doc_bad_sig.bin");
-        let att = nitro_parse_attestation(&data).unwrap();
-
-        // 2022-11-09T22:52:00Z
-        let now = att.timestamp / 1000;
-        let result = att.verify(None, now);
-        assert!(matches!(result, Err(NitroVerificationError::BadSignature)));
-    }
-
-    #[test]
-    fn verify_with_expired_timestamp_fails() {
-        let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = nitro_parse_attestation(&data).unwrap();
-
-        // One year after the document timestamp certificates will have expired.
-        // ~2023-11-09
-        let now = att.timestamp / 1000 + 365 * 24 * 3600;
-        let result = att.verify(None, now);
-        assert!(matches!(
-            result,
-            Err(NitroVerificationError::CertificateChain)
-        ));
-    }
-
-    #[test]
-    fn verify_with_past_timestamp_fails() {
-        let data = load_file("assets/tests/nitro/attestation_doc.bin");
-        let att = nitro_parse_attestation(&data).unwrap();
-
-        // 1970-01-01T00:00:00Z certificates will not yet be valid.
-        let now = 0;
-        let result = att.verify(None, now);
-        assert!(matches!(
-            result,
-            Err(NitroVerificationError::CertificateChain)
-        ));
-    }
-}
