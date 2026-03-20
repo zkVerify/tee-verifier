@@ -13,5 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod intel;
-mod nitro;
+static ROOT_CERT: &[u8] = include_bytes!("../assets/aws_nitro_root_g1.der");
+
+mod attestation;
+
+pub use attestation::{NitroAttestation, NitroParseError, NitroVerificationError};
+
+/// Parse a Nitro attestation document from binary COSE_Sign1 data.
+pub fn parse_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseError> {
+    attestation::parse_attestation(input)
+}

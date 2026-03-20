@@ -25,7 +25,9 @@ use std::io::Read;
 use assert_ok::assert_ok;
 use chrono::DateTime;
 
-use tee_verifier::{parse_crl, parse_quote, parse_tcb_response, Crl, VerificationError};
+use tee_verifier::{
+    intel_parse_quote, intel_parse_tcb_response, parse_crl_pem, Crl, VerificationError,
+};
 
 /// Helper function to load a file into a byte vector
 fn load_file(path: &str) -> Vec<u8> {
@@ -70,14 +72,14 @@ mod end_to_end {
 
         let now = parse_timestamp("2026-02-03T09:32:53Z");
 
-        let (_crl_time, crl) = parse_crl(&crl_data, &crl_chain, Some(&root_cert), now).unwrap();
+        let (_crl_time, crl) = parse_crl_pem(&crl_data, &crl_chain, Some(&root_cert), now).unwrap();
 
         // Verify that the tcb data is valid and signed
-        let tcb_response = parse_tcb_response(&tcb_data).unwrap();
+        let tcb_response = intel_parse_tcb_response(&tcb_data).unwrap();
         assert_ok!(tcb_response.verify(tcb_chain, &crl, now));
 
         // Verify the quote
-        let quote = parse_quote(&quote_data).unwrap();
+        let quote = intel_parse_quote(&quote_data).unwrap();
         assert_ok!(quote.verify(&tcb_response.tcb_info, &crl, now));
     }
 }
@@ -92,7 +94,7 @@ mod quote_parsing {
     #[test]
     fn parse_valid_quote_90() {
         let quote_data = load_file("assets/tests/intel/quote_90.dat");
-        assert_ok!(parse_quote(&quote_data));
+        assert_ok!(intel_parse_quote(&quote_data));
     }
 }
 
@@ -108,8 +110,8 @@ mod quote_verification_errors {
         let quote_data = load_file("assets/tests/intel/quote_no_cert.dat");
         let tcb_data = load_file("assets/tests/intel/tcb_info_90.json");
 
-        let quote = parse_quote(&quote_data).unwrap();
-        let tcb_response = parse_tcb_response(&tcb_data).unwrap();
+        let quote = intel_parse_quote(&quote_data).unwrap();
+        let tcb_response = intel_parse_tcb_response(&tcb_data).unwrap();
 
         let crl: Crl = vec![];
         let now = parse_timestamp("2026-02-03T09:32:53Z");
@@ -126,8 +128,8 @@ mod quote_verification_errors {
         // And the tcb data for the FMSPC starting with B0
         let tcb_data = load_file("assets/tests/intel/tcb_info_b0.json");
 
-        let quote = parse_quote(&quote_data).unwrap();
-        let tcb_response = parse_tcb_response(&tcb_data).unwrap();
+        let quote = intel_parse_quote(&quote_data).unwrap();
+        let tcb_response = intel_parse_tcb_response(&tcb_data).unwrap();
 
         let crl: Crl = vec![];
         let now = parse_timestamp("2026-02-03T09:32:53Z");

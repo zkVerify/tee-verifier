@@ -152,7 +152,7 @@ impl TcbResponse {
         crl: &crate::cert::Crl,
         now: u64,
     ) -> Result<(), CollateralError> {
-        let cert = crate::cert::verify_pem_cert_chain(
+        let cert = crate::cert::verify_cert_chain_pem(
             &certs,
             Some(crate::intel::ROOT_CERT),
             Some(crl),

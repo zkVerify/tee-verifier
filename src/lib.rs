@@ -24,27 +24,44 @@ use alloc::vec::Vec;
 
 mod cert;
 mod intel;
+mod nitro;
 
 pub use crate::{
     cert::{CertificateError, Crl, RevokedCertId},
     intel::{CollateralError, ParseError, QuoteV4, TcbResponse, VerificationError},
+    nitro::{NitroAttestation, NitroParseError, NitroVerificationError},
 };
 
 // =============================================================================
 // Generic
 // =============================================================================
 
-/// Parse a CRL from PEM data and validates its signature.
+/// Parse CRLs from PEM data and validate their signatures against a PEM certificate chain.
 /// Returns:
 /// - the most recent issue date for all the included CRLs
 /// - a Vec of revoked certificates, identified by the (issuer, serial_number) pair.
-pub fn parse_crl(
+pub fn parse_crl_pem(
     crl_pem: &Vec<u8>,
     pck_certificate_chain_pem: &Vec<u8>,
     root_cert: Option<&[u8]>,
     now: u64,
 ) -> Result<(u64, Crl), CertificateError> {
-    cert::parse_crl(crl_pem, pck_certificate_chain_pem, root_cert, now)
+    cert::parse_crl_pem(crl_pem, pck_certificate_chain_pem, root_cert, now)
+}
+
+/// Parse a CRL from DER data and validate its signature against a DER certificate chain.
+/// The signing chain is a flat byte slice of concatenated DER-encoded certificates
+/// (leaf first, root last), matching the PEM variant's flat-buffer approach.
+/// Returns:
+/// - the CRL's issue date
+/// - a Vec of revoked certificates, identified by the (issuer, serial_number) pair.
+pub fn parse_crl_der(
+    crl_der: &[u8],
+    signing_cert_chain_der: &[u8],
+    root_cert: Option<&[u8]>,
+    now: u64,
+) -> Result<(u64, Crl), CertificateError> {
+    cert::parse_crl_der(crl_der, signing_cert_chain_der, root_cert, now)
 }
 
 // =============================================================================
@@ -52,11 +69,20 @@ pub fn parse_crl(
 // =============================================================================
 
 /// Parse a TCB response from JSON bytes.
-pub fn parse_tcb_response(input: &[u8]) -> Result<TcbResponse, CollateralError> {
+pub fn intel_parse_tcb_response(input: &[u8]) -> Result<TcbResponse, CollateralError> {
     intel::parse_tcb_response(input)
 }
 
 /// Parse an Intel TDX quote from binary data.
-pub fn parse_quote(input: &[u8]) -> Result<QuoteV4, ParseError> {
+pub fn intel_parse_quote(input: &[u8]) -> Result<QuoteV4, ParseError> {
     intel::parse_quote(input)
+}
+
+// =============================================================================
+// Nitro Specific
+// =============================================================================
+
+/// Parse an AWS Nitro Enclave attestation document from binary COSE_Sign1 data.
+pub fn nitro_parse_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseError> {
+    nitro::parse_attestation(input)
 }

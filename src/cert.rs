@@ -22,7 +22,7 @@ use spki::ObjectIdentifier;
 use x509_verify::{
     x509_cert::{
         crl::CertificateList,
-        der::{Decode, Encode},
+        der::{Decode, Encode, Reader, SliceReader},
         Certificate,
     },
     Signature, VerifyInfo, VerifyingKey,
@@ -49,6 +49,8 @@ pub enum CertificateError {
     CertificateNotYetValid,
     /// The certificate has expired.
     CertificateExpired,
+    /// Expected exactly one CRL, but found multiple.
+    MultipleCrls,
 }
 
 /// Identifies a revoked certificate by its issuer and serial number.
@@ -80,7 +82,7 @@ fn verify_crl(crl: &CertificateList, key: &VerifyingKey) -> Result<(), Certifica
         .map_err(|_| CertificateError::KeyVerification)
 }
 
-pub fn verify_pem_cert_chain(
+pub fn verify_cert_chain_pem(
     pck_certificate_chain_pem: &Vec<u8>,
     root_cert: Option<&[u8]>,
     crl: Option<&Crl>,
@@ -91,8 +93,30 @@ pub fn verify_pem_cert_chain(
         .into_iter()
         .map(|pem| Certificate::from_der(pem.contents()))
         .collect();
-    let mut certs = certs.map_err(|_| CertificateError::Parse)?;
+    let certs = certs.map_err(|_| CertificateError::Parse)?;
+    verify_cert_chain(certs, root_cert, crl, now)
+}
 
+pub fn verify_cert_chain_der(
+    der_certs: &[&[u8]],
+    root_cert: Option<&[u8]>,
+    crl: Option<&Crl>,
+    now: u64,
+) -> Result<Certificate, CertificateError> {
+    let certs: Result<Vec<Certificate>, _> = der_certs
+        .iter()
+        .map(|der| Certificate::from_der(der))
+        .collect();
+    let certs = certs.map_err(|_| CertificateError::Parse)?;
+    verify_cert_chain(certs, root_cert, crl, now)
+}
+
+fn verify_cert_chain(
+    mut certs: Vec<Certificate>,
+    root_cert: Option<&[u8]>,
+    crl: Option<&Crl>,
+    now: u64,
+) -> Result<Certificate, CertificateError> {
     if certs.is_empty() {
         return Err(CertificateError::EmptyChain);
     }
@@ -286,67 +310,97 @@ pub fn verify_signature(
     Ok(())
 }
 
+/// Verify a CRL's signature and extract its revoked certificate entries.
+fn process_crl(
+    crl: &CertificateList,
+    sign_key: &VerifyingKey,
+) -> Result<(u64, Crl), CertificateError> {
+    verify_crl(crl, sign_key)?;
+
+    let issuer = crl
+        .tbs_cert_list
+        .issuer
+        .to_der()
+        .map_err(|_| CertificateError::Parse)?;
+
+    let mut revoked_certs: Crl = Vec::new();
+    if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
+        for entry in revoked {
+            revoked_certs.push(RevokedCertId {
+                issuer: issuer.clone(),
+                serial_number: entry.serial_number.as_bytes().to_vec(),
+            });
+        }
+    }
+
+    let this_update = crl.tbs_cert_list.this_update.to_unix_duration().as_secs();
+    Ok((this_update, revoked_certs))
+}
+
+fn signing_key_from_cert(cert: &Certificate) -> Result<VerifyingKey, CertificateError> {
+    cert.tbs_certificate
+        .subject_public_key_info
+        .clone()
+        .try_into()
+        .map_err(|_| CertificateError::KeyVerification)
+}
+
 // PUBLIC INTERFACE
-pub fn parse_crl(
+
+pub fn parse_crl_pem(
     crl_pem: &Vec<u8>,
     pck_certificate_chain_pem: &Vec<u8>,
     root_cert: Option<&[u8]>,
     now: u64,
 ) -> Result<(u64, Crl), CertificateError> {
     let pems = pem::parse_many(crl_pem).map_err(|_| CertificateError::Parse)?;
-    let crls: Result<Vec<CertificateList>, _> = pems
-        .into_iter()
-        .map(|pem| CertificateList::from_der(pem.contents()))
-        .collect();
-    let crls = crls.map_err(|_| CertificateError::Parse)?;
-
-    let sign_cert = verify_pem_cert_chain(pck_certificate_chain_pem, root_cert, None, now)?;
-    let sign_key: VerifyingKey = sign_cert
-        .tbs_certificate
-        .subject_public_key_info
-        .clone()
-        .try_into()
-        .map_err(|_| CertificateError::KeyVerification)?;
-
-    let mut revoked_certs: Crl = Vec::new();
-    let mut latest_this_update: u64 = 0;
-
-    for crl in &crls {
-        verify_crl(crl, &sign_key)?;
-
-        // Extract this_update and track the latest one
-        let this_update_duration = crl.tbs_cert_list.this_update.to_unix_duration().as_secs();
-
-        latest_this_update = match this_update_duration {
-            current if current > this_update_duration => current,
-            _ => this_update_duration,
-        };
-
-        let issuer = crl
-            .tbs_cert_list
-            .issuer
-            .to_der()
-            .map_err(|_| CertificateError::Parse)?;
-
-        if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
-            for entry in revoked {
-                revoked_certs.push(RevokedCertId {
-                    issuer: issuer.clone(),
-                    serial_number: entry.serial_number.as_bytes().to_vec(),
-                });
-            }
-        }
+    if pems.is_empty() {
+        return Err(CertificateError::Parse);
     }
+    if pems.len() > 1 {
+        return Err(CertificateError::MultipleCrls);
+    }
+    let crl = CertificateList::from_der(pems[0].contents()).map_err(|_| CertificateError::Parse)?;
 
-    Ok((latest_this_update, revoked_certs))
+    let sign_cert = verify_cert_chain_pem(pck_certificate_chain_pem, root_cert, None, now)?;
+    let sign_key = signing_key_from_cert(&sign_cert)?;
+
+    process_crl(&crl, &sign_key)
+}
+
+pub fn parse_crl_der(
+    crl_der: &[u8],
+    signing_cert_chain_der: &[u8],
+    root_cert: Option<&[u8]>,
+    now: u64,
+) -> Result<(u64, Crl), CertificateError> {
+    let crl = CertificateList::from_der(crl_der).map_err(|_| CertificateError::Parse)?;
+    let certs = parse_concat_der_certs(signing_cert_chain_der)?;
+    let sign_cert = verify_cert_chain(certs, root_cert, None, now)?;
+    let sign_key = signing_key_from_cert(&sign_cert)?;
+    process_crl(&crl, &sign_key)
+}
+
+fn parse_concat_der_certs(data: &[u8]) -> Result<Vec<Certificate>, CertificateError> {
+    let mut reader = SliceReader::new(data).map_err(|_| CertificateError::Parse)?;
+    let mut certs = Vec::new();
+    while !reader.is_finished() {
+        let cert = Certificate::decode(&mut reader).map_err(|_| CertificateError::Parse)?;
+        certs.push(cert);
+    }
+    Ok(certs)
 }
 
 #[cfg(test)]
 mod should {
-    use crate::cert::{parse_crl, CertificateError};
+    use crate::cert::{parse_crl_der, parse_crl_pem, verify_cert_chain_der, CertificateError};
+    use crate::nitro;
     use chrono::DateTime;
     use rstest::rstest;
     use std::{fs::File, io::Read};
+
+    /// Attestation doc 1 timestamp as seconds since epoch (2022-11-09T22:52:00Z).
+    const NITRO_ATT_DOC_1_TIMESTAMP: u64 = 1668034320;
 
     fn load_file(path: &str) -> Vec<u8> {
         let mut f = File::open(path).unwrap();
@@ -355,8 +409,22 @@ mod should {
         buf
     }
 
-    fn load_root_cert() -> Vec<u8> {
+    fn load_intel_root_cert() -> Vec<u8> {
         load_file("assets/Intel_SGX_Provisioning_Certification_RootCA.cer")
+    }
+
+    fn load_nitro_root_cert() -> Vec<u8> {
+        load_file("assets/aws_nitro_root_g1.der")
+    }
+
+    /// Parse the Nitro attestation doc and return the DER cert chain
+    /// (leaf first, then cabundle reversed) ready for verify_cert_chain_der.
+    fn nitro_cert_chain() -> Vec<Vec<u8>> {
+        let data = load_file("assets/tests/nitro/attestation_doc.bin");
+        let att = nitro::parse_attestation(&data).unwrap();
+        let mut chain = vec![att.certificate];
+        chain.extend(att.cabundle.into_iter().rev());
+        chain
     }
 
     #[rstest]
@@ -379,14 +447,14 @@ mod should {
     fn parse_quote(#[case] crl_path: &str, #[case] crl_chain_path: &str, #[case] exp_date: &str) {
         let crl_buf = load_file(crl_path);
         let crl_chain_buf = load_file(crl_chain_path);
-        let root_buf = load_root_cert();
+        let root_buf = load_intel_root_cert();
 
         let now = DateTime::parse_from_rfc3339(exp_date)
             .unwrap()
             .timestamp()
             .try_into()
             .unwrap();
-        let (date, _crl) = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf), now).unwrap();
+        let (date, _crl) = parse_crl_pem(&crl_buf, &crl_chain_buf, Some(&root_buf), now).unwrap();
         assert_eq!(date, now);
     }
 
@@ -404,11 +472,11 @@ mod should {
     ) {
         let crl_buf = load_file(crl_path);
         let crl_chain_buf = load_file(crl_chain_path);
-        let root_buf = load_root_cert();
+        let root_buf = load_intel_root_cert();
 
         let now = DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp() as u64;
 
-        let result = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf), now);
+        let result = parse_crl_pem(&crl_buf, &crl_chain_buf, Some(&root_buf), now);
         assert!(matches!(
             result,
             Err(CertificateError::CertificateNotYetValid)
@@ -429,11 +497,88 @@ mod should {
     ) {
         let crl_buf = load_file(crl_path);
         let crl_chain_buf = load_file(crl_chain_path);
-        let root_buf = load_root_cert();
+        let root_buf = load_intel_root_cert();
 
         let now = DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp() as u64;
 
-        let result = parse_crl(&crl_buf, &crl_chain_buf, Some(&root_buf), now);
+        let result = parse_crl_pem(&crl_buf, &crl_chain_buf, Some(&root_buf), now);
         assert!(matches!(result, Err(CertificateError::CertificateExpired)));
+    }
+
+    #[test]
+    fn reject_multiple_crls() {
+        let crl_buf = load_file("assets/tests/intel/crl.pem");
+        let crl_chain_buf = load_file("assets/tests/intel/crl_chain.pem");
+        let root_buf = load_intel_root_cert();
+        let now = DateTime::parse_from_rfc3339("2026-02-03T09:32:53Z")
+            .unwrap()
+            .timestamp() as u64;
+
+        // Concatenate two copies of the same CRL PEM
+        let mut double_crl = crl_buf.clone();
+        double_crl.extend_from_slice(&crl_buf);
+
+        let result = parse_crl_pem(&double_crl, &crl_chain_buf, Some(&root_buf), now);
+        assert!(matches!(result, Err(CertificateError::MultipleCrls)));
+    }
+
+    #[test]
+    fn verify_nitro_der_cert_chain() {
+        let chain = nitro_cert_chain();
+        let refs: Vec<&[u8]> = chain.iter().map(|c| c.as_slice()).collect();
+        let nitro_root = load_nitro_root_cert();
+        let now = NITRO_ATT_DOC_1_TIMESTAMP;
+        let leaf = verify_cert_chain_der(&refs, Some(&nitro_root), None, now).unwrap();
+        assert!(leaf
+            .tbs_certificate
+            .subject
+            .to_string()
+            .contains("i-04fd167167daacf3b"));
+    }
+
+    #[test]
+    fn reject_nitro_chain_with_wrong_root() {
+        let chain = nitro_cert_chain();
+        let refs: Vec<&[u8]> = chain.iter().map(|c| c.as_slice()).collect();
+        let now = NITRO_ATT_DOC_1_TIMESTAMP;
+        // Use the Intel root cert instead of the Nitro one
+        let intel_root = load_intel_root_cert();
+        let result = verify_cert_chain_der(&refs, Some(&intel_root), None, now);
+        assert!(matches!(result, Err(CertificateError::KeyVerification)));
+    }
+
+    /// Concatenate DER certs into a flat byte buffer.
+    fn concat_der(certs: &[&[u8]]) -> Vec<u8> {
+        certs.iter().flat_map(|c| c.iter().copied()).collect()
+    }
+
+    #[test]
+    fn parse_nitro_der_crl() {
+        let data = load_file("assets/tests/nitro/attestation_doc.bin");
+        let att = nitro::parse_attestation(&data).unwrap();
+        let nitro_root = load_nitro_root_cert();
+        let now = NITRO_ATT_DOC_1_TIMESTAMP;
+
+        // Zonal CRL signed by cabundle[1] (first intermediate);
+        // its signing chain is cabundle[1] → cabundle[0] → root.
+        let crl_buf = load_file("assets/tests/nitro/crl_zonal.der");
+        let sign_chain = concat_der(&[&att.cabundle[1], &att.cabundle[0]]);
+        let (date, crl) = parse_crl_der(&crl_buf, &sign_chain, Some(&nitro_root), now).unwrap();
+        // 2022-11-12T00:21:29Z
+        assert_eq!(date, 1668212489);
+        assert!(crl.is_empty());
+    }
+
+    #[test]
+    fn reject_nitro_crl_with_wrong_signer() {
+        let data = load_file("assets/tests/nitro/attestation_doc.bin");
+        let att = nitro::parse_attestation(&data).unwrap();
+        let nitro_root = load_nitro_root_cert();
+        let now = NITRO_ATT_DOC_1_TIMESTAMP;
+
+        // Zonal CRL verified against the wrong cert (cabundle[0] = root, not the intermediate)
+        let crl_buf = load_file("assets/tests/nitro/crl_zonal.der");
+        let result = parse_crl_der(&crl_buf, &att.cabundle[0], Some(&nitro_root), now);
+        assert!(matches!(result, Err(CertificateError::KeyVerification)));
     }
 }

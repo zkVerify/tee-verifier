@@ -461,7 +461,7 @@ impl QeCertificationData {
     ) -> Result<(), VerificationError> {
         match self.certification_data_type {
             CERT_DATA_TYPE_PCK_CHAIN => {
-                let cert = crate::cert::verify_pem_cert_chain(
+                let cert = crate::cert::verify_cert_chain_pem(
                     &self.certification_data,
                     Some(crate::intel::ROOT_CERT),
                     Some(crl),
@@ -713,20 +713,24 @@ mod should {
     }
 
     #[rstest]
-    #[case(
-        "assets/tests/intel/quote_b0.dat",
-        "assets/tests/intel/tcb_info_b0.json"
-    )]
-    #[should_panic(expected = "BadTcbStatus")]
-    #[case(
-        "assets/tests/intel/quote_90.dat",
-        "assets/tests/intel/tcb_info_90.json"
-    )]
-    fn verify_quote(#[case] quote_path: &str, #[case] coll_path: &str) {
-        let quote_buf = load_file(quote_path);
+    fn verify_quote() {
+        let quote_buf = load_file("assets/tests/intel/quote_b0.dat");
         let q = parse_quote(&quote_buf).unwrap();
 
-        let tcb_buf = load_file(coll_path);
+        let tcb_buf = load_file("assets/tests/intel/tcb_info_b0.json");
+        let tcb = parse_tcb_response(&tcb_buf).unwrap();
+        let crl: crate::cert::Crl = vec![];
+        let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
+        assert_ok!(q.verify(&tcb.tcb_info, &crl, now));
+    }
+
+    #[rstest]
+    #[should_panic(expected = "BadTcbStatus")]
+    fn verify_quote_with_bad_tcb_status() {
+        let quote_buf = load_file("assets/tests/intel/quote_90.dat");
+        let q = parse_quote(&quote_buf).unwrap();
+
+        let tcb_buf = load_file("assets/tests/intel/tcb_info_90.json");
         let tcb = parse_tcb_response(&tcb_buf).unwrap();
         let crl: crate::cert::Crl = vec![];
         let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
