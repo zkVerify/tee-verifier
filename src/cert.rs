@@ -700,4 +700,98 @@ mod should {
         let result = parse_crl_der(&crl_buf, &att.cabundle[0], Some(&nitro_root), now);
         assert!(matches!(result, Err(CertificateError::CrlIssuerMismatch)));
     }
+
+    /// Replace the first (and only expected) occurrence of `find` in `data`
+    /// with `replace`. Both slices must be the same length so DER offsets
+    /// are preserved.
+    fn patch_bytes(data: &[u8], find: &[u8], replace: &[u8]) -> Vec<u8> {
+        assert_eq!(find.len(), replace.len());
+        let pos = data
+            .windows(find.len())
+            .position(|w| w == find)
+            .expect("pattern not found in cert");
+        let mut out = data.to_vec();
+        out[pos..pos + find.len()].copy_from_slice(replace);
+        out
+    }
+
+    /// Build [intermediate, patched_root] from the Intel CRL chain PEM,
+    /// applying `patch` to the root DER bytes. Returns owned DER buffers
+    /// so the caller can take references for `verify_cert_chain_der`.
+    fn intel_chain_with_patched_root(find: &[u8], replace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let chain_pem = load_file("assets/tests/intel/crl_chain.pem");
+        let pems = pem::parse_many(&chain_pem).unwrap();
+        let intermediate = pems[0].contents().to_vec();
+        let root = pems[1].contents().to_vec();
+        let patched_root = patch_bytes(&root, find, replace);
+        (intermediate, patched_root)
+    }
+
+    const INTEL_NOW: u64 = 1738578773; // 2026-02-03T09:32:53Z, within Intel cert validity
+
+    // Intel root BasicConstraints DER: SEQUENCE { cA TRUE, pathLen 1 }
+    // → `30 06  01 01 FF  02 01 01`. The signature/SPKI of the patched
+    // root are unchanged, so the intermediate's signature still verifies
+    // against it and the new structural check is what fires.
+
+    #[test]
+    fn reject_chain_with_root_ca_false() {
+        // Flip cA TRUE → FALSE on the in-chain root.
+        let (intermediate, patched_root) = intel_chain_with_patched_root(
+            &[0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x01],
+            &[0x30, 0x06, 0x01, 0x01, 0x00, 0x02, 0x01, 0x01],
+        );
+        let refs: [&[u8]; 2] = [&intermediate, &patched_root];
+        let result = verify_cert_chain_der(&refs, None, None, INTEL_NOW);
+        assert!(matches!(
+            result,
+            Err(CertificateError::NotACertificateAuthority)
+        ));
+    }
+
+    #[test]
+    fn process_crl_rejects_spoofed_issuer() {
+        // Isolated test of the issuer↔signer-subject check in `process_crl`.
+        // Starts from a real CRL/signer pair that would otherwise pass the
+        // full verification (signature, KeyUsage, issuer DN), then mutates
+        // the parsed CRL's `issuer` field in memory. The mutation makes the
+        // CRL signature no longer verify, but the CrlIssuerMismatch check
+        // fires before signature verification — so a positive result here
+        // demonstrates the check is what's gating acceptance, not the
+        // signature check that would otherwise reject the same input.
+        use super::process_crl;
+        use x509_verify::x509_cert::{crl::CertificateList, der::Decode, Certificate};
+
+        let data = load_file("assets/tests/nitro/attestation_doc.bin");
+        let att = nitro::parse_attestation(&data).unwrap();
+
+        let crl_buf = load_file("assets/tests/nitro/crl_zonal.der");
+        let mut crl = CertificateList::from_der(crl_buf.as_slice()).unwrap();
+        let zonal_ca = Certificate::from_der(&att.cabundle[1]).unwrap();
+        let root = Certificate::from_der(&att.cabundle[0]).unwrap();
+
+        // Sanity: with the matching signer, the CRL is accepted.
+        process_crl(&crl, &zonal_ca).expect("matching issuer/signer should be accepted");
+
+        // Spoof the CRL's issuer field to claim the root's DN.
+        crl.tbs_cert_list.issuer = root.tbs_certificate.subject.clone();
+        assert!(matches!(
+            process_crl(&crl, &zonal_ca),
+            Err(CertificateError::CrlIssuerMismatch)
+        ));
+    }
+
+    #[test]
+    fn reject_chain_with_root_missing_key_cert_sign() {
+        // Patch the root KeyUsage BIT STRING from {keyCertSign, cRLSign}
+        // (0x06) to {cRLSign} (0x02) only. cA stays TRUE, so the cA check
+        // passes and we land on the keyCertSign check.
+        let (intermediate, patched_root) = intel_chain_with_patched_root(
+            &[0x04, 0x04, 0x03, 0x02, 0x01, 0x06],
+            &[0x04, 0x04, 0x03, 0x02, 0x01, 0x02],
+        );
+        let refs: [&[u8]; 2] = [&intermediate, &patched_root];
+        let result = verify_cert_chain_der(&refs, None, None, INTEL_NOW);
+        assert!(matches!(result, Err(CertificateError::MissingKeyCertSign)));
+    }
 }
