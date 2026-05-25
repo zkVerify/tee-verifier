@@ -23,10 +23,15 @@ use x509_verify::{
     x509_cert::{
         crl::CertificateList,
         der::{Decode, Encode, Reader, SliceReader},
+        ext::pkix::{BasicConstraints, KeyUsage, KeyUsages},
         Certificate,
     },
     Signature, VerifyInfo, VerifyingKey,
 };
+
+// RFC 5280 §4.2.1.9 BasicConstraints, §4.2.1.3 KeyUsage.
+const OID_BASIC_CONSTRAINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.19");
+const OID_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.15");
 
 /// Errors that can occur during certificate operations.
 #[derive(Debug)]
@@ -51,6 +56,20 @@ pub enum CertificateError {
     CertificateExpired,
     /// Expected exactly one CRL, but found multiple.
     MultipleCrls,
+    /// An X.509 extension was present but could not be parsed.
+    MalformedExtension,
+    /// A non-leaf certificate is missing `BasicConstraints.cA = TRUE`.
+    NotACertificateAuthority,
+    /// A non-leaf certificate has a `KeyUsage` extension but lacks `keyCertSign`.
+    MissingKeyCertSign,
+    /// A CRL signer has a `KeyUsage` extension but lacks `cRLSign`.
+    MissingCrlSign,
+    /// `certs[i].issuer` does not equal `certs[i+1].subject` (DER-equal).
+    IssuerSubjectMismatch,
+    /// A `BasicConstraints.pathLenConstraint` is violated by the chain length.
+    PathLenExceeded,
+    /// The CRL's `issuer` field does not match the signing certificate's `subject`.
+    CrlIssuerMismatch,
 }
 
 /// Identifies a revoked certificate by its issuer and serial number.
@@ -123,10 +142,60 @@ fn verify_cert_chain(
 
     if let Some(r) = root_cert {
         let root = Certificate::from_der(r).map_err(|_| CertificateError::Parse)?;
-        certs.push(root);
+        // The PEM/DER chain may already include the root (typical of Intel
+        // PCK chains). Appending again would inflate path-length counts and
+        // double-check the same signature, so skip if subject+SPKI match.
+        let already_present = certs.last().is_some_and(|last| {
+            last.tbs_certificate.subject == root.tbs_certificate.subject
+                && last.tbs_certificate.subject_public_key_info
+                    == root.tbs_certificate.subject_public_key_info
+        });
+        if !already_present {
+            certs.push(root);
+        }
     }
     for c in 0..certs.len() - 1 {
-        let key: VerifyingKey = certs[c + 1]
+        let parent = &certs[c + 1];
+
+        // RFC 5280 §4.1.2.4 / §4.1.2.6: name chaining.
+        let child_issuer = certs[c]
+            .tbs_certificate
+            .issuer
+            .to_der()
+            .map_err(|_| CertificateError::Parse)?;
+        let parent_subject = parent
+            .tbs_certificate
+            .subject
+            .to_der()
+            .map_err(|_| CertificateError::Parse)?;
+        if child_issuer != parent_subject {
+            return Err(CertificateError::IssuerSubjectMismatch);
+        }
+
+        // RFC 5280 §4.2.1.9 / §4.2.1.3: the issuing cert must be a CA (a
+        // missing BasicConstraints extension or `cA = FALSE` is equivalent
+        // here), and (if KeyUsage is present) must assert keyCertSign.
+        let bc = basic_constraints(parent)?;
+        if !bc.as_ref().map(|b| b.ca).unwrap_or(false) {
+            return Err(CertificateError::NotACertificateAuthority);
+        }
+        if let Some(ku) = key_usage(parent)? {
+            if !ku.0.contains(KeyUsages::KeyCertSign) {
+                return Err(CertificateError::MissingKeyCertSign);
+            }
+        }
+        // RFC 5280 §4.2.1.9: pathLenConstraint bounds the number of
+        // non-self-issued intermediate CAs that may follow this cert toward
+        // the end-entity. With certs[0] as the end-entity, intermediates
+        // strictly between `parent` (index c+1) and the end-entity are at
+        // indices 1..=c, i.e. `c` of them.
+        if let Some(path_len) = bc.and_then(|b| b.path_len_constraint) {
+            if c > path_len as usize {
+                return Err(CertificateError::PathLenExceeded);
+            }
+        }
+
+        let key: VerifyingKey = parent
             .tbs_certificate
             .subject_public_key_info
             .clone()
@@ -136,6 +205,29 @@ fn verify_cert_chain(
     }
 
     Ok(certs[0].clone())
+}
+
+fn find_ext(cert: &Certificate, oid: ObjectIdentifier) -> Option<&[u8]> {
+    cert.tbs_certificate
+        .extensions
+        .as_ref()?
+        .iter()
+        .find(|e| e.extn_id == oid)
+        .map(|e| e.extn_value.as_bytes())
+}
+
+fn basic_constraints(cert: &Certificate) -> Result<Option<BasicConstraints>, CertificateError> {
+    find_ext(cert, OID_BASIC_CONSTRAINTS)
+        .map(|raw| {
+            BasicConstraints::from_der(raw).map_err(|_| CertificateError::MalformedExtension)
+        })
+        .transpose()
+}
+
+fn key_usage(cert: &Certificate) -> Result<Option<KeyUsage>, CertificateError> {
+    find_ext(cert, OID_KEY_USAGE)
+        .map(|raw| KeyUsage::from_der(raw).map_err(|_| CertificateError::MalformedExtension))
+        .transpose()
 }
 
 fn verify_certificate(
@@ -313,15 +405,36 @@ pub fn verify_signature(
 /// Verify a CRL's signature and extract its revoked certificate entries.
 fn process_crl(
     crl: &CertificateList,
-    sign_key: &VerifyingKey,
+    sign_cert: &Certificate,
 ) -> Result<(u64, Crl), CertificateError> {
-    verify_crl(crl, sign_key)?;
-
-    let issuer = crl
+    // RFC 5280 §5.1.2.3: the CRL's issuer must equal the signing cert's subject.
+    let crl_issuer_der = crl
         .tbs_cert_list
         .issuer
         .to_der()
         .map_err(|_| CertificateError::Parse)?;
+    let sign_subject_der = sign_cert
+        .tbs_certificate
+        .subject
+        .to_der()
+        .map_err(|_| CertificateError::Parse)?;
+    if crl_issuer_der != sign_subject_der {
+        return Err(CertificateError::CrlIssuerMismatch);
+    }
+
+    // RFC 5280 §4.2.1.3: if the signer has a KeyUsage extension, it must
+    // assert cRLSign. (Either a CA cert with cRLSign, or a delegated CRL
+    // signer; we don't require cA here so both are accepted.)
+    if let Some(ku) = key_usage(sign_cert)? {
+        if !ku.0.contains(KeyUsages::CRLSign) {
+            return Err(CertificateError::MissingCrlSign);
+        }
+    }
+
+    let sign_key = signing_key_from_cert(sign_cert)?;
+    verify_crl(crl, &sign_key)?;
+
+    let issuer = crl_issuer_der;
 
     let mut revoked_certs: Crl = Vec::new();
     if let Some(revoked) = &crl.tbs_cert_list.revoked_certificates {
@@ -363,9 +476,8 @@ pub fn parse_crl_pem(
     let crl = CertificateList::from_der(pems[0].contents()).map_err(|_| CertificateError::Parse)?;
 
     let sign_cert = verify_cert_chain_pem(pck_certificate_chain_pem, root_cert, None, now)?;
-    let sign_key = signing_key_from_cert(&sign_cert)?;
 
-    process_crl(&crl, &sign_key)
+    process_crl(&crl, &sign_cert)
 }
 
 pub fn parse_crl_der(
@@ -377,8 +489,7 @@ pub fn parse_crl_der(
     let crl = CertificateList::from_der(crl_der).map_err(|_| CertificateError::Parse)?;
     let certs = parse_concat_der_certs(signing_cert_chain_der)?;
     let sign_cert = verify_cert_chain(certs, root_cert, None, now)?;
-    let sign_key = signing_key_from_cert(&sign_cert)?;
-    process_crl(&crl, &sign_key)
+    process_crl(&crl, &sign_cert)
 }
 
 fn parse_concat_der_certs(data: &[u8]) -> Result<Vec<Certificate>, CertificateError> {
@@ -541,10 +652,15 @@ mod should {
         let chain = nitro_cert_chain();
         let refs: Vec<&[u8]> = chain.iter().map(|c| c.as_slice()).collect();
         let now = NITRO_ATT_DOC_1_TIMESTAMP;
-        // Use the Intel root cert instead of the Nitro one
+        // Use the Intel root cert instead of the Nitro one. The Nitro chain
+        // already ends in the Nitro root; appending the Intel root therefore
+        // produces a name-chaining mismatch at the last step.
         let intel_root = load_intel_root_cert();
         let result = verify_cert_chain_der(&refs, Some(&intel_root), None, now);
-        assert!(matches!(result, Err(CertificateError::KeyVerification)));
+        assert!(matches!(
+            result,
+            Err(CertificateError::IssuerSubjectMismatch)
+        ));
     }
 
     /// Concatenate DER certs into a flat byte buffer.
@@ -576,9 +692,12 @@ mod should {
         let nitro_root = load_nitro_root_cert();
         let now = NITRO_ATT_DOC_1_TIMESTAMP;
 
-        // Zonal CRL verified against the wrong cert (cabundle[0] = root, not the intermediate)
+        // Zonal CRL with the wrong signer chain (cabundle[0] = root, not the
+        // intermediate that actually issued the CRL). The CRL's `issuer` DN
+        // is the zonal CA, not the root, so the issuer-vs-signer check
+        // rejects this before signature verification.
         let crl_buf = load_file("assets/tests/nitro/crl_zonal.der");
         let result = parse_crl_der(&crl_buf, &att.cabundle[0], Some(&nitro_root), now);
-        assert!(matches!(result, Err(CertificateError::KeyVerification)));
+        assert!(matches!(result, Err(CertificateError::CrlIssuerMismatch)));
     }
 }
