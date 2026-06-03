@@ -154,7 +154,10 @@ fn verify_cert_chain(
             certs.push(root);
         }
     }
-    for c in 0..certs.len() - 1 {
+
+    // Walk the certificate chain from the root down to the leaf, so that the Root CA domain is
+    // enforced immediately.
+    for c in (0..certs.len() - 1).rev() {
         let parent = &certs[c + 1];
 
         // RFC 5280 §4.1.2.4 / §4.1.2.6: name chaining.
