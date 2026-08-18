@@ -18,9 +18,15 @@ static ROOT_CERT: &[u8] =
 
 mod collaterals;
 mod constants;
+mod policy;
 mod quote;
 
 pub use collaterals::{CollateralError, TcbResponse};
+pub use constants::{
+    BODY_MRCONFIGID_SIZE, BODY_MROWNERCONFIG_SIZE, BODY_MROWNER_SIZE, BODY_MRTD_SIZE,
+    BODY_REPORTDATA_SIZE, BODY_RTMR_SIZE, BODY_XFAM_SIZE, RTMR_COUNT, TD_REPORT_POLICY_SIZE,
+};
+pub use policy::{PolicyError, TdReportPolicy};
 pub use quote::{ParseError, QuoteV4, VerificationError};
 
 /// Parse a TCB response from JSON bytes.

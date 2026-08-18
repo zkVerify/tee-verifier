@@ -28,7 +28,12 @@ mod nitro;
 
 pub use crate::{
     cert::{CertificateError, Crl, RevokedCertId},
-    intel::{CollateralError, ParseError, QuoteV4, TcbResponse, VerificationError},
+    intel::{
+        CollateralError, ParseError, PolicyError, QuoteV4, TcbResponse, TdReportPolicy,
+        VerificationError, BODY_MRCONFIGID_SIZE, BODY_MROWNERCONFIG_SIZE, BODY_MROWNER_SIZE,
+        BODY_MRTD_SIZE, BODY_REPORTDATA_SIZE, BODY_RTMR_SIZE, BODY_XFAM_SIZE, RTMR_COUNT,
+        TD_REPORT_POLICY_SIZE,
+    },
     nitro::{NitroAttestation, NitroParseError, NitroVerificationError},
 };
 
