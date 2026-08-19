@@ -160,21 +160,16 @@ impl NitroAttestation {
         &self,
         policy: &crate::nitro::NitroPolicy,
     ) -> Result<(), crate::nitro::NitroPolicyError> {
-        let matches = policy
-            .pcrs
-            .iter()
-            .enumerate()
-            .all(|(i, pcr)| {
-                pcr.is_none_or(|v| {
-                    self.pcrs
-                        .get(&(i as u32))
-                        .is_some_and(|reported| reported[..] == v[..])
-                })
+        let matches = policy.pcrs.iter().enumerate().all(|(i, pcr)| {
+            pcr.is_none_or(|v| {
+                self.pcrs
+                    .get(&(i as u32))
+                    .is_some_and(|reported| reported[..] == v[..])
             })
-            && policy
-                .user_data
-                .as_ref()
-                .is_none_or(|v| self.user_data.as_deref().unwrap_or(&[]) == v.as_slice());
+        }) && policy
+            .user_data
+            .as_ref()
+            .is_none_or(|v| self.user_data.as_deref().unwrap_or(&[]) == v.as_slice());
         if matches {
             Ok(())
         } else {

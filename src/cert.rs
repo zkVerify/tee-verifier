@@ -344,7 +344,10 @@ pub fn parse_oid_value_pair<'a>(
     } else {
         // Long form: data[1] & 0x7F is the number of length bytes
         let num_len_bytes = (data[1] & 0x7F) as usize;
-        if data.len() < 2 + num_len_bytes {
+        if num_len_bytes == 0
+            || num_len_bytes > core::mem::size_of::<usize>()
+            || data.len() < 2 + num_len_bytes
+        {
             return Err(CertificateError::ExtensionNotFound);
         }
         let mut len: usize = 0;
@@ -354,6 +357,9 @@ pub fn parse_oid_value_pair<'a>(
         (len, 2 + num_len_bytes)
     };
 
+    if content_len > data.len() - header_len {
+        return Err(CertificateError::ExtensionNotFound);
+    }
     let seq_len = header_len + content_len;
 
     // Now decode just this sequence
@@ -368,7 +374,7 @@ pub fn parse_oid_value_pair<'a>(
         .get(0)
         .map_err(|_| CertificateError::ExtensionNotFound)?
         .value();
-    if name[..name.len() - 1] != *oid.as_bytes() {
+    if name.is_empty() || name[..name.len() - 1] != *oid.as_bytes() {
         return Err(CertificateError::ExtensionNotFound);
     }
 
@@ -377,6 +383,23 @@ pub fn parse_oid_value_pair<'a>(
         .map_err(|_| CertificateError::ExtensionNotFound)?;
 
     Ok((val_obj.value(), seq_len))
+}
+
+/// Decode a non-negative DER `INTEGER`: big-endian, with a leading `0x00` sign pad.
+pub fn der_uint(bytes: &[u8]) -> Result<u64, CertificateError> {
+    let Some(first) = bytes.first() else {
+        return Err(CertificateError::MalformedExtension);
+    };
+    if first & 0x80 != 0 {
+        return Err(CertificateError::MalformedExtension);
+    }
+    let magnitude = bytes.strip_prefix(&[0x00]).unwrap_or(bytes);
+    if magnitude.len() > 8 {
+        return Err(CertificateError::MalformedExtension);
+    }
+    Ok(magnitude
+        .iter()
+        .fold(0u64, |acc, b| (acc << 8) | u64::from(*b)))
 }
 
 pub fn verify_signature(
@@ -507,7 +530,9 @@ fn parse_concat_der_certs(data: &[u8]) -> Result<Vec<Certificate>, CertificateEr
 
 #[cfg(test)]
 mod should {
-    use crate::cert::{parse_crl_der, parse_crl_pem, verify_cert_chain_der, CertificateError};
+    use crate::cert::{
+        der_uint, parse_crl_der, parse_crl_pem, verify_cert_chain_der, CertificateError,
+    };
     use crate::nitro;
     use chrono::DateTime;
     use rstest::rstest;
@@ -521,6 +546,34 @@ mod should {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).unwrap();
         buf
+    }
+
+    #[rstest]
+    #[case(&[0x00], 0)]
+    #[case(&[0x05], 5)]
+    #[case(&[0x0d], 13)]
+    #[case(&[0x7f], 127)]
+    #[case(&[0x00, 0x80], 128)]
+    #[case(&[0x00, 0xff], 255)]
+    #[case(&[0x01, 0x2c], 300)]
+    #[case(&[0x00, 0xff, 0xff], 65535)]
+    #[case(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], u64::MAX)]
+    #[case(&[0x00, 0x00, 0x05], 5)]
+    fn decode_der_unsigned_integers(#[case] content: &[u8], #[case] expected: u64) {
+        assert_eq!(der_uint(content).unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case(&[])]
+    #[case(&[0x80])]
+    #[case(&[0xff])]
+    #[case(&[0xff, 0x00])]
+    #[case(&[0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09])]
+    fn reject_malformed_der_integers(#[case] content: &[u8]) {
+        assert!(matches!(
+            der_uint(content),
+            Err(CertificateError::MalformedExtension)
+        ));
     }
 
     fn load_intel_root_cert() -> Vec<u8> {

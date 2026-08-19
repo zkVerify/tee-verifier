@@ -35,9 +35,9 @@ pub use crate::{
         TD_REPORT_POLICY_SIZE,
     },
     nitro::{
-        NitroAttestation, NitroParseError, NitroPolicy, NitroPolicyError,
-        NitroVerificationError, NITRO_MAX_USER_DATA_SIZE, NITRO_PCR_COUNT, NITRO_PCR_SIZE,
-        NITRO_POLICY_MAX_SIZE, NITRO_POLICY_MIN_SIZE,
+        NitroAttestation, NitroParseError, NitroPolicy, NitroPolicyError, NitroVerificationError,
+        NITRO_MAX_USER_DATA_SIZE, NITRO_PCR_COUNT, NITRO_PCR_SIZE, NITRO_POLICY_MAX_SIZE,
+        NITRO_POLICY_MIN_SIZE,
     },
 };
 

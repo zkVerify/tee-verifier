@@ -448,24 +448,18 @@ impl QeCertificationData {
         // Parse each sequence, advancing by the actual encoded length
 
         // TCB SVN values (first 16 sequences)
+        // A component above 127 is DER-encoded over two bytes
         for t in tcb.iter_mut() {
             let (value, seq_len) = crate::cert::parse_oid_value_pair(&data[offset..], &oid)?;
-            *t = value[0];
+            *t = u8::try_from(crate::cert::der_uint(value)?)
+                .map_err(|_| crate::cert::CertificateError::MalformedExtension)?;
             offset += seq_len;
         }
 
         // PCE SVN (17th sequence)
         let (pce_buf, _) = crate::cert::parse_oid_value_pair(&data[offset..], &oid)?;
-
-        let pce: u16 = match pce_buf.len() {
-            1 => pce_buf[0].into(),
-            2 => u16::from_le_bytes(
-                pce_buf[0..2]
-                    .try_into()
-                    .map_err(|_| crate::cert::CertificateError::ExtensionNotFound)?,
-            ),
-            _ => return Err(crate::cert::CertificateError::ExtensionNotFound),
-        };
+        let pce = u16::try_from(crate::cert::der_uint(pce_buf)?)
+            .map_err(|_| crate::cert::CertificateError::MalformedExtension)?;
         Ok((tcb, pce))
     }
 
@@ -766,9 +760,11 @@ mod should {
         CERT_DATA_TYPE_QE_REPORT, ECDSA_SIGNATURE_SIZE, QE_REPORT_SIZE, QUOTE_BODY_SIZE,
         QUOTE_HEADER_SIZE,
     };
+    use crate::intel::constants::{INTEL_TCB_OID, TCB_SVN_COUNT};
     use crate::intel::policy::{PolicyError, TdReportPolicy};
     use crate::intel::quote::{
-        parse_quote, ParseError, QeReportCertificationData, QuoteV4, VerificationError,
+        parse_quote, ParseError, PceSvn, QeCertificationData, QeReportCertificationData, QuoteV4,
+        TcbSvn, VerificationError,
     };
     use assert_ok::assert_ok;
     use rstest::rstest;
@@ -779,6 +775,88 @@ mod should {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).unwrap();
         buf
+    }
+
+    /// Encoded INTEL_TCB_OID, the parent of the 17 TCB extension entries.
+    const TCB_OID_BYTES: [u8; 10] = [0x2a, 0x86, 0x48, 0x86, 0xf8, 0x4d, 0x01, 0x0d, 0x01, 0x02];
+
+    /// Encode a value as a DER `INTEGER`, as a PCK certificate does.
+    fn der_integer(value: u16) -> Vec<u8> {
+        let mut content = if value > 0xff {
+            vec![(value >> 8) as u8, value as u8]
+        } else {
+            vec![value as u8]
+        };
+        if content[0] & 0x80 != 0 {
+            content.insert(0, 0x00);
+        }
+        let mut out = vec![0x02, content.len() as u8];
+        out.extend(content);
+        out
+    }
+
+    /// Build the TCB extension payload: 16 component entries followed by the PCE SVN.
+    fn tcb_extension(components: [u16; TCB_SVN_COUNT], pcesvn: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, value) in components
+            .iter()
+            .chain(core::iter::once(&pcesvn))
+            .enumerate()
+        {
+            let mut oid = vec![0x06, (TCB_OID_BYTES.len() + 1) as u8];
+            oid.extend_from_slice(&TCB_OID_BYTES);
+            oid.push(i as u8 + 1);
+            let integer = der_integer(*value);
+            out.push(0x30);
+            out.push((oid.len() + integer.len()) as u8);
+            out.extend(oid);
+            out.extend(integer);
+        }
+        out
+    }
+
+    fn extract(components: [u16; TCB_SVN_COUNT], pcesvn: u16) -> (TcbSvn, PceSvn) {
+        let oid = spki::ObjectIdentifier::new(INTEL_TCB_OID).expect("valid OID");
+        QeCertificationData::extract_tcb_info(&tcb_extension(components, pcesvn), oid)
+            .expect("extension should parse")
+    }
+
+    #[test]
+    fn extract_single_byte_tcb_components() {
+        let components = [3, 3, 2, 2, 4, 1, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (tcb, pce) = extract(components, 11);
+        assert_eq!(tcb, [3, 3, 2, 2, 4, 1, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(pce, 11);
+    }
+
+    #[test]
+    fn extract_tcb_components_above_127() {
+        // A component of 255 is encoded `02 02 00 ff`
+        let components = [5, 5, 2, 2, 5, 255, 0, 2, 128, 127, 0, 0, 0, 0, 0, 0];
+        let (tcb, pce) = extract(components, 13);
+        assert_eq!(tcb, [5, 5, 2, 2, 5, 255, 0, 2, 128, 127, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(pce, 13);
+    }
+
+    #[test]
+    fn extract_pcesvn_above_127() {
+        // Two-byte PCE SVNs are big-endian: 200 is `00 c8`, not 0xc800
+        let components = [0; TCB_SVN_COUNT];
+        assert_eq!(extract(components, 200).1, 200);
+        assert_eq!(extract(components, 128).1, 128);
+        assert_eq!(extract(components, 300).1, 300);
+        assert_eq!(extract(components, u16::MAX).1, u16::MAX);
+    }
+
+    #[test]
+    fn reject_tcb_component_wider_than_u8() {
+        let mut components = [0u16; TCB_SVN_COUNT];
+        components[0] = 256;
+        let oid = spki::ObjectIdentifier::new(INTEL_TCB_OID).expect("valid OID");
+        assert!(matches!(
+            QeCertificationData::extract_tcb_info(&tcb_extension(components, 13), oid),
+            Err(crate::cert::CertificateError::MalformedExtension)
+        ));
     }
 
     #[rstest]
