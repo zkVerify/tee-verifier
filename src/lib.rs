@@ -34,7 +34,11 @@ pub use crate::{
         BODY_MRTD_SIZE, BODY_REPORTDATA_SIZE, BODY_RTMR_SIZE, BODY_XFAM_SIZE, RTMR_COUNT,
         TD_REPORT_POLICY_SIZE,
     },
-    nitro::{NitroAttestation, NitroParseError, NitroVerificationError},
+    nitro::{
+        NitroAttestation, NitroParseError, NitroPolicy, NitroPolicyError,
+        NitroVerificationError, NITRO_MAX_USER_DATA_SIZE, NITRO_PCR_COUNT, NITRO_PCR_SIZE,
+        NITRO_POLICY_MAX_SIZE, NITRO_POLICY_MIN_SIZE,
+    },
 };
 
 // =============================================================================
