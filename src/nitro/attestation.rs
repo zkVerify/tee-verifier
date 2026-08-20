@@ -151,6 +151,32 @@ pub fn parse_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseErr
 }
 
 impl NitroAttestation {
+    /// Check the attestation document against the expected values of a policy.
+    ///
+    /// Every pinned PCR must be reported by the document with exactly the pinned
+    /// value; a pinned `user_data` must match exactly, with an absent `user_data`
+    /// treated as empty bytes.
+    pub fn check_policy(
+        &self,
+        policy: &crate::nitro::NitroPolicy,
+    ) -> Result<(), crate::nitro::NitroPolicyError> {
+        let matches = policy.pcrs.iter().enumerate().all(|(i, pcr)| {
+            pcr.is_none_or(|v| {
+                self.pcrs
+                    .get(&(i as u32))
+                    .is_some_and(|reported| reported[..] == v[..])
+            })
+        }) && policy
+            .user_data
+            .as_ref()
+            .is_none_or(|v| self.user_data.as_deref().unwrap_or(&[]) == v.as_slice());
+        if matches {
+            Ok(())
+        } else {
+            Err(crate::nitro::NitroPolicyError::Mismatch)
+        }
+    }
+
     /// Verify the attestation document against the embedded AWS Nitro root CA.
     ///
     /// `crl` is an optional certificate revocation list to check against.
@@ -391,6 +417,101 @@ mod should {
             // 2026-02-13T16:29:13Z
             let now = att.timestamp / 1000;
             assert_ok!(att.verify(None, now));
+        }
+    }
+
+    mod policy {
+        use super::*;
+        use crate::nitro::{NitroPolicy, NitroPolicyError, NITRO_PCR_COUNT, NITRO_PCR_SIZE};
+
+        /// Build a policy pinning every PCR and the user_data of an attestation.
+        fn policy_of(att: &NitroAttestation) -> NitroPolicy {
+            let mut pcrs = [None; NITRO_PCR_COUNT];
+            for (i, pcr) in pcrs.iter_mut().enumerate() {
+                *pcr = Some(
+                    att.pcrs[&(i as u32)]
+                        .as_slice()
+                        .try_into()
+                        .expect("test PCRs are SHA-384 digests"),
+                );
+            }
+            NitroPolicy {
+                pcrs,
+                user_data: Some(att.user_data.clone().unwrap_or_default()),
+            }
+        }
+
+        #[test]
+        fn accept_matching_full_policy() {
+            let data = load_file("assets/tests/nitro/attestation_doc.bin");
+            let att = parse_attestation(&data).unwrap();
+            let policy = policy_of(&att);
+            assert_ok!(att.check_policy(&policy));
+            // and through the canonical byte encoding
+            let parsed = NitroPolicy::from_bytes(&policy.to_bytes()).unwrap();
+            assert_ok!(att.check_policy(&parsed));
+        }
+
+        #[test]
+        fn accept_matching_minimal_policy() {
+            let data = load_file("assets/tests/nitro/attestation_doc.bin");
+            let att = parse_attestation(&data).unwrap();
+            let mut policy = policy_of(&att);
+            for pcr in policy.pcrs.iter_mut().skip(1) {
+                *pcr = None;
+            }
+            policy.user_data = None;
+            assert_ok!(att.check_policy(&policy));
+        }
+
+        #[test]
+        fn reject_mismatched_pcr() {
+            let data = load_file("assets/tests/nitro/attestation_doc.bin");
+            let att = parse_attestation(&data).unwrap();
+            let mut policy = policy_of(&att);
+            policy.pcrs[0].as_mut().expect("pcr0 is pinned")[0] ^= 1;
+            assert_eq!(
+                att.check_policy(&policy).unwrap_err(),
+                NitroPolicyError::Mismatch
+            );
+        }
+
+        #[test]
+        fn reject_mismatched_user_data() {
+            let data = load_file("assets/tests/nitro/attestation_doc.bin");
+            let att = parse_attestation(&data).unwrap();
+            assert!(att.user_data.is_some());
+
+            let mut policy = policy_of(&att);
+            policy
+                .user_data
+                .as_mut()
+                .expect("user_data is pinned")
+                .push(0);
+            assert_eq!(
+                att.check_policy(&policy).unwrap_err(),
+                NitroPolicyError::Mismatch
+            );
+
+            // Expecting empty user_data must not match a document that carries some.
+            let mut policy = policy_of(&att);
+            policy.user_data = Some(Vec::new());
+            assert_eq!(
+                att.check_policy(&policy).unwrap_err(),
+                NitroPolicyError::Mismatch
+            );
+        }
+
+        #[test]
+        fn reject_pinned_pcr_missing_from_document() {
+            let data = load_file("assets/tests/nitro/attestation_doc.bin");
+            let mut att = parse_attestation(&data).unwrap();
+            let policy = policy_of(&att);
+            att.pcrs.remove(&3);
+            assert_eq!(
+                att.check_policy(&policy).unwrap_err(),
+                NitroPolicyError::Mismatch
+            );
         }
     }
 

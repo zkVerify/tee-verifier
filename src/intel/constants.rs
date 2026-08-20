@@ -78,12 +78,21 @@ pub const BODY_MRSEAM_SIZE: usize = 48;
 pub const BODY_MRSIGNERSEAM_SIZE: usize = 48;
 pub const BODY_SEAMATTRIBUTES_SIZE: usize = 8;
 pub const BODY_TDATTRIBUTES_SIZE: usize = 8;
+/// Size in bytes of the TD report's XFAM (eXtended Features Available Mask) field.
 pub const BODY_XFAM_SIZE: usize = 8;
+/// Size in bytes of the TD report's MRTD measurement (SHA-384).
 pub const BODY_MRTD_SIZE: usize = 48;
+/// Size in bytes of the TD report's MRCONFIGID field.
 pub const BODY_MRCONFIGID_SIZE: usize = 48;
+/// Size in bytes of the TD report's MROWNER field.
 pub const BODY_MROWNER_SIZE: usize = 48;
+/// Size in bytes of the TD report's MROWNERCONFIG field.
 pub const BODY_MROWNERCONFIG_SIZE: usize = 48;
+/// Size in bytes of one runtime extendable measurement register (SHA-384).
 pub const BODY_RTMR_SIZE: usize = 48;
+/// Number of runtime extendable measurement registers in a TD report.
+pub const RTMR_COUNT: usize = 4;
+/// Size in bytes of the TD report's REPORTDATA field.
 pub const BODY_REPORTDATA_SIZE: usize = 64;
 
 // QuoteBodyV4 field offsets (derived from sizes)
@@ -133,11 +142,56 @@ pub const TCB_SVN_COUNT: usize = 16;
 pub const FMSPC_SIZE: usize = 6;
 
 // =============================================================================
+// TD report policy (canonical pubs encoding)
+// =============================================================================
+
+/// Version 1 of the TD report policy encoding.
+pub const POLICY_VERSION_V1: u8 = 1;
+
+pub const POLICY_VERSION_SIZE: usize = 1;
+pub const POLICY_BITMAP_SIZE: usize = 1;
+
+// TdReportPolicy field offsets (derived from sizes)
+pub const POLICY_VERSION_OFFSET: usize = 0;
+pub const POLICY_BITMAP_OFFSET: usize = POLICY_VERSION_OFFSET + POLICY_VERSION_SIZE;
+pub const POLICY_XFAM_OFFSET: usize = POLICY_BITMAP_OFFSET + POLICY_BITMAP_SIZE;
+pub const POLICY_MRTD_OFFSET: usize = POLICY_XFAM_OFFSET + BODY_XFAM_SIZE;
+pub const POLICY_MRCONFIGID_OFFSET: usize = POLICY_MRTD_OFFSET + BODY_MRTD_SIZE;
+pub const POLICY_MROWNER_OFFSET: usize = POLICY_MRCONFIGID_OFFSET + BODY_MRCONFIGID_SIZE;
+pub const POLICY_MROWNERCONFIG_OFFSET: usize = POLICY_MROWNER_OFFSET + BODY_MROWNER_SIZE;
+pub const POLICY_RTMR0_OFFSET: usize = POLICY_MROWNERCONFIG_OFFSET + BODY_MROWNERCONFIG_SIZE;
+pub const POLICY_RTMR1_OFFSET: usize = POLICY_RTMR0_OFFSET + BODY_RTMR_SIZE;
+pub const POLICY_RTMR2_OFFSET: usize = POLICY_RTMR1_OFFSET + BODY_RTMR_SIZE;
+pub const POLICY_RTMR3_OFFSET: usize = POLICY_RTMR2_OFFSET + BODY_RTMR_SIZE;
+pub const POLICY_REPORTDATA_OFFSET: usize = POLICY_RTMR3_OFFSET + BODY_RTMR_SIZE;
+/// Total size in bytes of the canonical TD report policy encoding.
+pub const TD_REPORT_POLICY_SIZE: usize = POLICY_REPORTDATA_OFFSET + BODY_REPORTDATA_SIZE;
+
+// TdReportPolicy presence bitmap bits (one per optional field)
+pub const POLICY_BIT_XFAM: u8 = 1 << 0;
+pub const POLICY_BIT_MRCONFIGID: u8 = 1 << 1;
+pub const POLICY_BIT_MROWNER: u8 = 1 << 2;
+pub const POLICY_BIT_MROWNERCONFIG: u8 = 1 << 3;
+pub const POLICY_BIT_RTMR0: u8 = 1 << 4;
+pub const POLICY_BIT_RTMR1: u8 = 1 << 5;
+pub const POLICY_BIT_RTMR2: u8 = 1 << 6;
+pub const POLICY_BIT_RTMR3: u8 = 1 << 7;
+
+// =============================================================================
+// Quote header validation
+// =============================================================================
+
+/// Version 4 of the quote data structure.
+pub const QUOTE_VERSION_V4: u16 = 4;
+/// TEE type value for Intel TDX quotes (0x00000000 is SGX).
+pub const TEE_TYPE_TDX: u32 = 0x0000_0081;
+
+// =============================================================================
 // Attestation key types
 // =============================================================================
 
 /// ECDSA-256-with-P-256 curve attestation key type
-pub const ATTESTATION_KEY_TYPE_ECDSA_256_P256: i16 = 2;
+pub const ATTESTATION_KEY_TYPE_ECDSA_256_P256: u16 = 2;
 
 // =============================================================================
 // TD Attributes

@@ -13,6 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Intel TDX Quote v4 parsing and verification.
+//!
+//! Implements the TD Quote v4 format from "Intel® Trust Domain Extensions Data Center
+//! Attestation Primitives (Intel® TDX DCAP): Quote Generation Library and Quote
+//! Verification Library", Rev 0.9, April 2026, Appendix A.3 "Version 4 Quote Format".
+//! <https://download.01.org/intel-sgx/latest/dcap-latest/linux/docs/Intel_TDX_DCAP_Quoting_Library_API.pdf>
+
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -22,6 +29,7 @@ use spki::ObjectIdentifier;
 
 use crate::intel::collaterals::{TcbInfo, TcbLevel, TcbStatus};
 use crate::intel::constants::*;
+use crate::intel::policy::{PolicyError, TdReportPolicy};
 
 /// Errors that can occur when parsing a quote.
 #[derive(Debug, PartialEq)]
@@ -46,6 +54,10 @@ pub enum ParseError {
     UnsupportedCertificationDataType,
     /// The QE vendor ID is not recognized.
     UnsupportedVendorId,
+    /// The quote version is not supported.
+    UnsupportedQuoteVersion,
+    /// The TEE type is not supported.
+    UnsupportedTeeType,
 }
 
 /// Errors that can occur when verifying a quote.
@@ -79,18 +91,18 @@ pub enum VerificationError {
 
 #[derive(Debug)]
 struct QuoteHeader {
-    /// Version of the quote_no_cert.data structure.
-    version: i16,
+    /// Version of the quote data structure.
+    version: u16,
     /// Type of the Attestation Key used by the Quoting Enclave.
     /// Supported values:
     /// 2 (ECDSA-256-with-P-256 curve)
     /// 3 (ECDSA-384-with-P-384 curve) (Note: currently not supported)
     /// (Note: 0 and 1 are reserved, for when EPID is moved to version 4 quotes.)
-    attestation_key_type: i16,
+    attestation_key_type: u16,
     /// TEE for this Attestation
     /// 0x00000000: SGX
     /// 0x00000081: TDX
-    tee_type: i32,
+    tee_type: u32,
     /// reserved
     reserved1: [u8; HEADER_RESERVED1_SIZE],
     /// reserved
@@ -113,17 +125,17 @@ impl QuoteHeader {
             return Err(ParseError::InvalidHeader);
         }
         Ok(QuoteHeader {
-            version: i16::from_le_bytes(
+            version: u16::from_le_bytes(
                 input[HEADER_VERSION_OFFSET..HEADER_ATTESTATION_KEY_TYPE_OFFSET]
                     .try_into()
                     .map_err(|_| ParseError::InvalidHeader)?,
             ),
-            attestation_key_type: i16::from_le_bytes(
+            attestation_key_type: u16::from_le_bytes(
                 input[HEADER_ATTESTATION_KEY_TYPE_OFFSET..HEADER_TEE_TYPE_OFFSET]
                     .try_into()
                     .map_err(|_| ParseError::InvalidHeader)?,
             ),
-            tee_type: i32::from_le_bytes(
+            tee_type: u32::from_le_bytes(
                 input[HEADER_TEE_TYPE_OFFSET..HEADER_RESERVED1_OFFSET]
                     .try_into()
                     .map_err(|_| ParseError::InvalidHeader)?,
@@ -161,18 +173,25 @@ impl QuoteHeader {
 
 #[derive(Debug)]
 struct QeAuthenticationData {
-    _size: i16,
+    _size: u16,
     data: Vec<u8>,
 }
 
 impl QeAuthenticationData {
     fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
-        let size = i16::from_le_bytes(
+        if input.len() < AUTH_DATA_SIZE_FIELD {
+            return Err(ParseError::InvalidAuthenticationData);
+        }
+        let size = u16::from_le_bytes(
             input[..AUTH_DATA_SIZE_FIELD]
                 .try_into()
-                .map_err(|_| ParseError::InvalidAuthenticationData)?,
+                .expect("length checked above"),
         );
-        let data = input[AUTH_DATA_SIZE_FIELD..AUTH_DATA_SIZE_FIELD + size as usize].to_vec();
+        let end = AUTH_DATA_SIZE_FIELD + usize::from(size);
+        if input.len() < end {
+            return Err(ParseError::InvalidAuthenticationData);
+        }
+        let data = input[AUTH_DATA_SIZE_FIELD..end].to_vec();
         Ok(QeAuthenticationData { _size: size, data })
     }
 }
@@ -192,23 +211,28 @@ struct QeReportCertificationData {
 
 impl QeReportCertificationData {
     fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
-        let qe_report = &input[..QE_REPORT_SIZE];
-        let qe_report_signature = &input[QE_REPORT_SIZE..QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE];
+        if input.len() < QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE {
+            return Err(ParseError::InvalidQeReport);
+        }
+        let qe_report = input[..QE_REPORT_SIZE]
+            .try_into()
+            .expect("length checked above");
+        let qe_report_signature = input[QE_REPORT_SIZE..QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE]
+            .try_into()
+            .expect("length checked above");
         let qe_authentication_data =
             QeAuthenticationData::from_bytes(&input[QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE..])?;
+        // The nested certification data must be a PCK chain (spec Appendix A.3.12)
         let qe_certification_data = QeCertificationData::from_bytes(
             &input[QE_REPORT_SIZE
                 + ECDSA_SIGNATURE_SIZE
                 + AUTH_DATA_SIZE_FIELD
                 + qe_authentication_data.data.len()..],
+            CERT_DATA_TYPE_PCK_CHAIN,
         )?;
         Ok(QeReportCertificationData {
-            qe_report: qe_report
-                .try_into()
-                .map_err(|_| ParseError::InvalidQeReport)?,
-            qe_report_signature: qe_report_signature
-                .try_into()
-                .map_err(|_| ParseError::InvalidQeReportSignature)?,
+            qe_report,
+            qe_report_signature,
             qe_authentication_data,
             qe_certification_data,
         })
@@ -264,32 +288,26 @@ struct QuoteBodyV4 {
     /// XFAM (eXtended Features Available Mask) is
     /// defined as a 64b bitmap, which has the same
     /// format as XCR0 or IA32_XSS MSR.
-    _xfam: [u8; BODY_XFAM_SIZE],
+    xfam: [u8; BODY_XFAM_SIZE],
     /// Measurement of the initial contents of the TD.
-    _mrtd: [u8; BODY_MRTD_SIZE],
+    mrtd: [u8; BODY_MRTD_SIZE],
     /// Software-defined ID for non-owner-defined
     /// configuration of the TD, e.g., runtime or OS configuration.
-    _mrconfigid: [u8; BODY_MRCONFIGID_SIZE],
+    mrconfigid: [u8; BODY_MRCONFIGID_SIZE],
     /// Software-defined ID for the TD's owner
-    _mrowner: [u8; BODY_MROWNER_SIZE],
+    mrowner: [u8; BODY_MROWNER_SIZE],
     /// Software-defined ID for owner-defined
     /// configuration of the TD, e.g., specific to the
     /// workload rather than the runtime or OS.
-    _mrownerconfig: [u8; BODY_MROWNERCONFIG_SIZE],
-    /// Runtime extendable measurement register
-    _rtmr0: [u8; BODY_RTMR_SIZE],
-    /// Runtime extendable measurement register
-    _rtmr1: [u8; BODY_RTMR_SIZE],
-    /// Runtime extendable measurement register
-    _rtmr2: [u8; BODY_RTMR_SIZE],
-    /// Runtime extendable measurement register
-    _rtmr3: [u8; BODY_RTMR_SIZE],
+    mrownerconfig: [u8; BODY_MROWNERCONFIG_SIZE],
+    /// Runtime extendable measurement registers
+    rtmrs: [[u8; BODY_RTMR_SIZE]; RTMR_COUNT],
     /// Each TD Quote is based on a TD Report. The
     /// TD is free to provide 64 bytes of custom data
     /// to a TD Report. For instance, this space can be
     /// used to hold a nonce, a public key, or a hash
     /// of a larger block of data.
-    _reportdata: [u8; BODY_REPORTDATA_SIZE],
+    reportdata: [u8; BODY_REPORTDATA_SIZE],
 }
 
 impl QuoteBodyV4 {
@@ -313,34 +331,36 @@ impl QuoteBodyV4 {
             tdattributes: input[BODY_TDATTRIBUTES_OFFSET..BODY_XFAM_OFFSET]
                 .try_into()
                 .map_err(|_| ParseError::InvalidBody)?,
-            _xfam: input[BODY_XFAM_OFFSET..BODY_MRTD_OFFSET]
+            xfam: input[BODY_XFAM_OFFSET..BODY_MRTD_OFFSET]
                 .try_into()
                 .map_err(|_| ParseError::InvalidBody)?,
-            _mrtd: input[BODY_MRTD_OFFSET..BODY_MRCONFIGID_OFFSET]
+            mrtd: input[BODY_MRTD_OFFSET..BODY_MRCONFIGID_OFFSET]
                 .try_into()
                 .map_err(|_| ParseError::InvalidBody)?,
-            _mrconfigid: input[BODY_MRCONFIGID_OFFSET..BODY_MROWNER_OFFSET]
+            mrconfigid: input[BODY_MRCONFIGID_OFFSET..BODY_MROWNER_OFFSET]
                 .try_into()
                 .map_err(|_| ParseError::InvalidBody)?,
-            _mrowner: input[BODY_MROWNER_OFFSET..BODY_MROWNERCONFIG_OFFSET]
+            mrowner: input[BODY_MROWNER_OFFSET..BODY_MROWNERCONFIG_OFFSET]
                 .try_into()
                 .map_err(|_| ParseError::InvalidBody)?,
-            _mrownerconfig: input[BODY_MROWNERCONFIG_OFFSET..BODY_RTMR0_OFFSET]
+            mrownerconfig: input[BODY_MROWNERCONFIG_OFFSET..BODY_RTMR0_OFFSET]
                 .try_into()
                 .map_err(|_| ParseError::InvalidBody)?,
-            _rtmr0: input[BODY_RTMR0_OFFSET..BODY_RTMR1_OFFSET]
-                .try_into()
-                .map_err(|_| ParseError::InvalidBody)?,
-            _rtmr1: input[BODY_RTMR1_OFFSET..BODY_RTMR2_OFFSET]
-                .try_into()
-                .map_err(|_| ParseError::InvalidBody)?,
-            _rtmr2: input[BODY_RTMR2_OFFSET..BODY_RTMR3_OFFSET]
-                .try_into()
-                .map_err(|_| ParseError::InvalidBody)?,
-            _rtmr3: input[BODY_RTMR3_OFFSET..BODY_REPORTDATA_OFFSET]
-                .try_into()
-                .map_err(|_| ParseError::InvalidBody)?,
-            _reportdata: input[BODY_REPORTDATA_OFFSET..QUOTE_BODY_SIZE]
+            rtmrs: [
+                input[BODY_RTMR0_OFFSET..BODY_RTMR1_OFFSET]
+                    .try_into()
+                    .map_err(|_| ParseError::InvalidBody)?,
+                input[BODY_RTMR1_OFFSET..BODY_RTMR2_OFFSET]
+                    .try_into()
+                    .map_err(|_| ParseError::InvalidBody)?,
+                input[BODY_RTMR2_OFFSET..BODY_RTMR3_OFFSET]
+                    .try_into()
+                    .map_err(|_| ParseError::InvalidBody)?,
+                input[BODY_RTMR3_OFFSET..BODY_REPORTDATA_OFFSET]
+                    .try_into()
+                    .map_err(|_| ParseError::InvalidBody)?,
+            ],
+            reportdata: input[BODY_REPORTDATA_OFFSET..QUOTE_BODY_SIZE]
                 .try_into()
                 .map_err(|_| ParseError::InvalidBody)?,
         })
@@ -354,20 +374,21 @@ impl QuoteBodyV4 {
         output[BODY_SEAMATTRIBUTES_OFFSET..BODY_TDATTRIBUTES_OFFSET]
             .copy_from_slice(&self._seamattributes);
         output[BODY_TDATTRIBUTES_OFFSET..BODY_XFAM_OFFSET].copy_from_slice(&self.tdattributes);
-        output[BODY_XFAM_OFFSET..BODY_MRTD_OFFSET].copy_from_slice(&self._xfam);
-        output[BODY_MRTD_OFFSET..BODY_MRCONFIGID_OFFSET].copy_from_slice(&self._mrtd);
-        output[BODY_MRCONFIGID_OFFSET..BODY_MROWNER_OFFSET].copy_from_slice(&self._mrconfigid);
-        output[BODY_MROWNER_OFFSET..BODY_MROWNERCONFIG_OFFSET].copy_from_slice(&self._mrowner);
-        output[BODY_MROWNERCONFIG_OFFSET..BODY_RTMR0_OFFSET].copy_from_slice(&self._mrownerconfig);
-        output[BODY_RTMR0_OFFSET..BODY_RTMR1_OFFSET].copy_from_slice(&self._rtmr0);
-        output[BODY_RTMR1_OFFSET..BODY_RTMR2_OFFSET].copy_from_slice(&self._rtmr1);
-        output[BODY_RTMR2_OFFSET..BODY_RTMR3_OFFSET].copy_from_slice(&self._rtmr2);
-        output[BODY_RTMR3_OFFSET..BODY_REPORTDATA_OFFSET].copy_from_slice(&self._rtmr3);
-        output[BODY_REPORTDATA_OFFSET..QUOTE_BODY_SIZE].copy_from_slice(&self._reportdata);
+        output[BODY_XFAM_OFFSET..BODY_MRTD_OFFSET].copy_from_slice(&self.xfam);
+        output[BODY_MRTD_OFFSET..BODY_MRCONFIGID_OFFSET].copy_from_slice(&self.mrtd);
+        output[BODY_MRCONFIGID_OFFSET..BODY_MROWNER_OFFSET].copy_from_slice(&self.mrconfigid);
+        output[BODY_MROWNER_OFFSET..BODY_MROWNERCONFIG_OFFSET].copy_from_slice(&self.mrowner);
+        output[BODY_MROWNERCONFIG_OFFSET..BODY_RTMR0_OFFSET].copy_from_slice(&self.mrownerconfig);
+        output[BODY_RTMR0_OFFSET..BODY_RTMR1_OFFSET].copy_from_slice(&self.rtmrs[0]);
+        output[BODY_RTMR1_OFFSET..BODY_RTMR2_OFFSET].copy_from_slice(&self.rtmrs[1]);
+        output[BODY_RTMR2_OFFSET..BODY_RTMR3_OFFSET].copy_from_slice(&self.rtmrs[2]);
+        output[BODY_RTMR3_OFFSET..BODY_REPORTDATA_OFFSET].copy_from_slice(&self.rtmrs[3]);
+        output[BODY_REPORTDATA_OFFSET..QUOTE_BODY_SIZE].copy_from_slice(&self.reportdata);
     }
 }
 
 /// A parsed Intel TDX Quote v4.
+#[derive(Debug)]
 pub struct QuoteV4 {
     header: QuoteHeader,
     body: QuoteBodyV4,
@@ -385,7 +406,7 @@ struct QeCertificationData {
 }
 
 impl QeCertificationData {
-    fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
+    fn from_bytes(input: &[u8], expected_type: u16) -> Result<Self, ParseError> {
         if input.len() < CERT_DATA_HEADER_SIZE {
             return Err(ParseError::InvalidCertificationData);
         }
@@ -404,9 +425,7 @@ impl QeCertificationData {
         }
         let certification_data =
             input[CERT_DATA_HEADER_SIZE..CERT_DATA_HEADER_SIZE + (size as usize)].to_vec();
-        if certification_data_type != CERT_DATA_TYPE_PCK_CHAIN
-            && certification_data_type != CERT_DATA_TYPE_QE_REPORT
-        {
+        if certification_data_type != expected_type {
             return Err(ParseError::UnsupportedCertificationDataType);
         }
 
@@ -429,24 +448,18 @@ impl QeCertificationData {
         // Parse each sequence, advancing by the actual encoded length
 
         // TCB SVN values (first 16 sequences)
+        // A component above 127 is DER-encoded over two bytes
         for t in tcb.iter_mut() {
             let (value, seq_len) = crate::cert::parse_oid_value_pair(&data[offset..], &oid)?;
-            *t = value[0];
+            *t = u8::try_from(crate::cert::der_uint(value)?)
+                .map_err(|_| crate::cert::CertificateError::MalformedExtension)?;
             offset += seq_len;
         }
 
         // PCE SVN (17th sequence)
         let (pce_buf, _) = crate::cert::parse_oid_value_pair(&data[offset..], &oid)?;
-
-        let pce: u16 = match pce_buf.len() {
-            1 => pce_buf[0].into(),
-            2 => u16::from_le_bytes(
-                pce_buf[0..2]
-                    .try_into()
-                    .map_err(|_| crate::cert::CertificateError::ExtensionNotFound)?,
-            ),
-            _ => return Err(crate::cert::CertificateError::ExtensionNotFound),
-        };
+        let pce = u16::try_from(crate::cert::der_uint(pce_buf)?)
+            .map_err(|_| crate::cert::CertificateError::MalformedExtension)?;
         Ok((tcb, pce))
     }
 
@@ -541,8 +554,11 @@ impl QuoteSignatureData {
             [ECDSA_SIGNATURE_SIZE..ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE]
             .try_into()
             .expect("length checked above");
-        let qe_certification_data =
-            QeCertificationData::from_bytes(&input[ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE..])?;
+        // The top-level certification data of a v4 quote is always a QE report (spec Appendix A.3.12)
+        let qe_certification_data = QeCertificationData::from_bytes(
+            &input[ECDSA_SIGNATURE_SIZE + ATTESTATION_KEY_SIZE..],
+            CERT_DATA_TYPE_QE_REPORT,
+        )?;
         Ok(QuoteSignatureData {
             quote_signature,
             ecdsa_attestation_key,
@@ -581,6 +597,13 @@ impl QuoteV4 {
     fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         // HEADER
         let header = QuoteHeader::from_bytes(input)?;
+        // The body below is parsed with the v4 TD-report layout
+        if header.version != QUOTE_VERSION_V4 {
+            return Err(ParseError::UnsupportedQuoteVersion);
+        }
+        if header.tee_type != TEE_TYPE_TDX {
+            return Err(ParseError::UnsupportedTeeType);
+        }
         if header.attestation_key_type != ATTESTATION_KEY_TYPE_ECDSA_256_P256 {
             return Err(ParseError::UnsupportedAttestationKeyType);
         }
@@ -615,8 +638,67 @@ impl QuoteV4 {
         })
     }
 
+    /// The 64 bytes of REPORTDATA chosen by the TD; covered by the AK signature.
+    pub fn report_data(&self) -> &[u8; BODY_REPORTDATA_SIZE] {
+        &self.body.reportdata
+    }
+
+    /// Measurement of the initial contents of the TD.
+    pub fn mrtd(&self) -> &[u8; BODY_MRTD_SIZE] {
+        &self.body.mrtd
+    }
+
+    /// Software-defined ID for non-owner-defined configuration of the TD.
+    pub fn mrconfigid(&self) -> &[u8; BODY_MRCONFIGID_SIZE] {
+        &self.body.mrconfigid
+    }
+
+    /// Software-defined ID for the TD's owner.
+    pub fn mrowner(&self) -> &[u8; BODY_MROWNER_SIZE] {
+        &self.body.mrowner
+    }
+
+    /// Software-defined ID for owner-defined configuration of the TD.
+    pub fn mrownerconfig(&self) -> &[u8; BODY_MROWNERCONFIG_SIZE] {
+        &self.body.mrownerconfig
+    }
+
+    /// The runtime extendable measurement registers (RTMR0..=RTMR3).
+    pub fn rtmrs(&self) -> &[[u8; BODY_RTMR_SIZE]; RTMR_COUNT] {
+        &self.body.rtmrs
+    }
+
+    /// XFAM (eXtended Features Available Mask), a 64-bit bitmap in XCR0/IA32_XSS format.
+    pub fn xfam(&self) -> &[u8; BODY_XFAM_SIZE] {
+        &self.body.xfam
+    }
+
+    /// Check the TD report against a policy; every pinned field must match exactly.
+    ///
+    /// Equality only — the quote's signatures still have to be checked with [`Self::verify`].
+    pub fn check_policy(&self, policy: &TdReportPolicy) -> Result<(), PolicyError> {
+        let matches = policy.mrtd == *self.mrtd()
+            && policy.report_data == *self.report_data()
+            && policy.xfam.is_none_or(|v| v == *self.xfam())
+            && policy.mrconfigid.is_none_or(|v| v == *self.mrconfigid())
+            && policy.mrowner.is_none_or(|v| v == *self.mrowner())
+            && policy
+                .mrownerconfig
+                .is_none_or(|v| v == *self.mrownerconfig())
+            && policy
+                .rtmrs
+                .iter()
+                .zip(self.rtmrs())
+                .all(|(p, r)| p.is_none_or(|v| v == *r));
+        if matches {
+            Ok(())
+        } else {
+            Err(PolicyError::Mismatch)
+        }
+    }
+
     fn extended_checks(&self) -> Result<(), VerificationError> {
-        // Section 2.3.2 Extended TD Checks
+        // Section 2.3.2 "Extended TD Checks" of the Intel TDX DCAP Quoting Library API (see module docs)
 
         // Verify that all TD Under Debug flags are set to zero.
         if self.body.tdattributes[TDATTRIBUTES_DEBUG_INDEX] != TDATTRIBUTES_DEBUG_DISABLED {
@@ -674,7 +756,16 @@ pub fn parse_quote(input: &[u8]) -> Result<QuoteV4, ParseError> {
 #[cfg(test)]
 mod should {
     use crate::intel::collaterals::parse_tcb_response;
-    use crate::intel::quote::{parse_quote, VerificationError};
+    use crate::intel::constants::{
+        CERT_DATA_TYPE_QE_REPORT, ECDSA_SIGNATURE_SIZE, QE_REPORT_SIZE, QUOTE_BODY_SIZE,
+        QUOTE_HEADER_SIZE,
+    };
+    use crate::intel::constants::{INTEL_TCB_OID, TCB_SVN_COUNT};
+    use crate::intel::policy::{PolicyError, TdReportPolicy};
+    use crate::intel::quote::{
+        parse_quote, ParseError, PceSvn, QeCertificationData, QeReportCertificationData, QuoteV4,
+        TcbSvn, VerificationError,
+    };
     use assert_ok::assert_ok;
     use rstest::rstest;
     use std::{fs::File, io::Read};
@@ -684,6 +775,88 @@ mod should {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).unwrap();
         buf
+    }
+
+    /// Encoded INTEL_TCB_OID, the parent of the 17 TCB extension entries.
+    const TCB_OID_BYTES: [u8; 10] = [0x2a, 0x86, 0x48, 0x86, 0xf8, 0x4d, 0x01, 0x0d, 0x01, 0x02];
+
+    /// Encode a value as a DER `INTEGER`, as a PCK certificate does.
+    fn der_integer(value: u16) -> Vec<u8> {
+        let mut content = if value > 0xff {
+            vec![(value >> 8) as u8, value as u8]
+        } else {
+            vec![value as u8]
+        };
+        if content[0] & 0x80 != 0 {
+            content.insert(0, 0x00);
+        }
+        let mut out = vec![0x02, content.len() as u8];
+        out.extend(content);
+        out
+    }
+
+    /// Build the TCB extension payload: 16 component entries followed by the PCE SVN.
+    fn tcb_extension(components: [u16; TCB_SVN_COUNT], pcesvn: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, value) in components
+            .iter()
+            .chain(core::iter::once(&pcesvn))
+            .enumerate()
+        {
+            let mut oid = vec![0x06, (TCB_OID_BYTES.len() + 1) as u8];
+            oid.extend_from_slice(&TCB_OID_BYTES);
+            oid.push(i as u8 + 1);
+            let integer = der_integer(*value);
+            out.push(0x30);
+            out.push((oid.len() + integer.len()) as u8);
+            out.extend(oid);
+            out.extend(integer);
+        }
+        out
+    }
+
+    fn extract(components: [u16; TCB_SVN_COUNT], pcesvn: u16) -> (TcbSvn, PceSvn) {
+        let oid = spki::ObjectIdentifier::new(INTEL_TCB_OID).expect("valid OID");
+        QeCertificationData::extract_tcb_info(&tcb_extension(components, pcesvn), oid)
+            .expect("extension should parse")
+    }
+
+    #[test]
+    fn extract_single_byte_tcb_components() {
+        let components = [3, 3, 2, 2, 4, 1, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (tcb, pce) = extract(components, 11);
+        assert_eq!(tcb, [3, 3, 2, 2, 4, 1, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(pce, 11);
+    }
+
+    #[test]
+    fn extract_tcb_components_above_127() {
+        // A component of 255 is encoded `02 02 00 ff`
+        let components = [5, 5, 2, 2, 5, 255, 0, 2, 128, 127, 0, 0, 0, 0, 0, 0];
+        let (tcb, pce) = extract(components, 13);
+        assert_eq!(tcb, [5, 5, 2, 2, 5, 255, 0, 2, 128, 127, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(pce, 13);
+    }
+
+    #[test]
+    fn extract_pcesvn_above_127() {
+        // Two-byte PCE SVNs are big-endian: 200 is `00 c8`, not 0xc800
+        let components = [0; TCB_SVN_COUNT];
+        assert_eq!(extract(components, 200).1, 200);
+        assert_eq!(extract(components, 128).1, 128);
+        assert_eq!(extract(components, 300).1, 300);
+        assert_eq!(extract(components, u16::MAX).1, u16::MAX);
+    }
+
+    #[test]
+    fn reject_tcb_component_wider_than_u8() {
+        let mut components = [0u16; TCB_SVN_COUNT];
+        components[0] = 256;
+        let oid = spki::ObjectIdentifier::new(INTEL_TCB_OID).expect("valid OID");
+        assert!(matches!(
+            QeCertificationData::extract_tcb_info(&tcb_extension(components, 13), oid),
+            Err(crate::cert::CertificateError::MalformedExtension)
+        ));
     }
 
     #[rstest]
@@ -735,6 +908,133 @@ mod should {
         let crl: crate::cert::Crl = vec![];
         let now: u64 = 1769529377; // Tue Jan 27 2026 15:56:17 GMT+0000
         assert_ok!(q.verify(&tcb.tcb_info, &crl, now));
+    }
+
+    #[test]
+    fn body_round_trips_exactly() {
+        let raw = load_file("assets/tests/intel/quote_b0.dat");
+        let q = parse_quote(&raw).unwrap();
+        let mut out = [0u8; QUOTE_HEADER_SIZE + QUOTE_BODY_SIZE];
+        q.header.to_bytes(&mut out);
+        q.body.to_bytes(&mut out[QUOTE_HEADER_SIZE..]);
+        assert_eq!(&out[..], &raw[..QUOTE_HEADER_SIZE + QUOTE_BODY_SIZE]);
+    }
+
+    #[test]
+    fn exposes_report_data() {
+        let raw = load_file("assets/tests/intel/quote_b0.dat");
+        let q = parse_quote(&raw).unwrap();
+        assert_eq!(
+            q.report_data(),
+            &hex_literal::hex!(
+                "9a9d48e7f6799642d3d1b34e1e5e1742d4bb02dd6ddd551862c1211d35c304f9
+                 eca3efdbb481601c163cf52493d6e44aed55d51ec39b7e518fadb92c2b523f20"
+            )
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_version() {
+        let mut buf = load_file("assets/tests/intel/quote_b0.dat");
+        buf[0] = 5;
+        assert_eq!(
+            parse_quote(&buf).unwrap_err(),
+            ParseError::UnsupportedQuoteVersion
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_tee_type() {
+        let mut buf = load_file("assets/tests/intel/quote_b0.dat");
+        buf[4] = 0x00; // SGX
+        assert_eq!(
+            parse_quote(&buf).unwrap_err(),
+            ParseError::UnsupportedTeeType
+        );
+    }
+
+    #[test]
+    fn reject_nested_qe_report_certification_data() {
+        let mut data = vec![0u8; QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE];
+        data.extend_from_slice(&0u16.to_le_bytes()); // empty auth data
+        data.extend_from_slice(&CERT_DATA_TYPE_QE_REPORT.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            QeReportCertificationData::from_bytes(&data).unwrap_err(),
+            ParseError::UnsupportedCertificationDataType
+        );
+    }
+
+    #[test]
+    fn reject_truncated_qe_report() {
+        assert_eq!(
+            QeReportCertificationData::from_bytes(&[0u8; QE_REPORT_SIZE]).unwrap_err(),
+            ParseError::InvalidQeReport
+        );
+    }
+
+    #[test]
+    fn reject_oversized_authentication_data() {
+        let mut data = vec![0u8; QE_REPORT_SIZE + ECDSA_SIGNATURE_SIZE];
+        data.extend_from_slice(&16u16.to_le_bytes()); // claims 16 bytes, none present
+        assert_eq!(
+            QeReportCertificationData::from_bytes(&data).unwrap_err(),
+            ParseError::InvalidAuthenticationData
+        );
+    }
+
+    fn policy_of(q: &QuoteV4) -> TdReportPolicy {
+        TdReportPolicy {
+            xfam: Some(*q.xfam()),
+            mrtd: *q.mrtd(),
+            mrconfigid: Some(*q.mrconfigid()),
+            mrowner: Some(*q.mrowner()),
+            mrownerconfig: Some(*q.mrownerconfig()),
+            rtmrs: q.rtmrs().map(Some),
+            report_data: *q.report_data(),
+        }
+    }
+
+    #[test]
+    fn accept_matching_policy() {
+        let raw = load_file("assets/tests/intel/quote_b0.dat");
+        let q = parse_quote(&raw).unwrap();
+        let policy = policy_of(&q);
+        assert_ok!(q.check_policy(&policy));
+        // and through the canonical byte encoding
+        let parsed = TdReportPolicy::from_bytes(&policy.to_bytes()).unwrap();
+        assert_ok!(q.check_policy(&parsed));
+    }
+
+    #[test]
+    fn accept_matching_minimal_policy() {
+        let raw = load_file("assets/tests/intel/quote_b0.dat");
+        let q = parse_quote(&raw).unwrap();
+        let mut policy = policy_of(&q);
+        policy.xfam = None;
+        policy.mrconfigid = None;
+        policy.mrowner = None;
+        policy.mrownerconfig = None;
+        policy.rtmrs = [None; 4];
+        assert_ok!(q.check_policy(&policy));
+    }
+
+    #[test]
+    fn reject_mismatched_policy() {
+        let raw = load_file("assets/tests/intel/quote_b0.dat");
+        let q = parse_quote(&raw).unwrap();
+
+        let mut policy = policy_of(&q);
+        policy.mrtd[0] ^= 1;
+        assert_eq!(q.check_policy(&policy).unwrap_err(), PolicyError::Mismatch);
+
+        let mut policy = policy_of(&q);
+        policy.report_data[63] ^= 1;
+        assert_eq!(q.check_policy(&policy).unwrap_err(), PolicyError::Mismatch);
+
+        let mut policy = policy_of(&q);
+        policy.rtmrs[2].as_mut().unwrap()[0] ^= 1;
+        assert_eq!(q.check_policy(&policy).unwrap_err(), PolicyError::Mismatch);
     }
 
     #[test]

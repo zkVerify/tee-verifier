@@ -16,8 +16,13 @@
 static ROOT_CERT: &[u8] = include_bytes!("../assets/aws_nitro_root_g1.der");
 
 mod attestation;
+mod policy;
 
 pub use attestation::{NitroAttestation, NitroParseError, NitroVerificationError};
+pub use policy::{
+    NitroPolicy, NitroPolicyError, NITRO_MAX_USER_DATA_SIZE, NITRO_PCR_COUNT, NITRO_PCR_SIZE,
+    NITRO_POLICY_MAX_SIZE, NITRO_POLICY_MIN_SIZE,
+};
 
 /// Parse a Nitro attestation document from binary COSE_Sign1 data.
 pub fn parse_attestation(input: &[u8]) -> Result<NitroAttestation, NitroParseError> {
